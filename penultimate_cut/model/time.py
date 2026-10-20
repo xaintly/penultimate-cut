@@ -50,3 +50,13 @@ def format_seconds(value: Fraction) -> str:
     only accept floating-point timestamps. Microsecond precision is far finer
     than any real frame boundary, so this never loses meaningful accuracy."""
     return f"{float(value):.6f}"
+
+
+def fraction_from_seconds(value: float) -> Fraction:
+    """Microsecond-quantized `Fraction` from a plain float (an mpv-reported
+    position, a mouse pixel converted to seconds, ...). `Fraction(a_float)`
+    alone would keep that float's exact, often enormous binary denominator
+    (e.g. `Fraction(0.1)` has an 18-digit one) -- fine for one value, but
+    ruinous for performance once later arithmetic keeps compounding it,
+    which happens constantly over mouse-drag-driven timeline math."""
+    return Fraction(round(value * 1_000_000), 1_000_000)

@@ -27,6 +27,8 @@ from typing import Literal
 
 import mpv
 
+from penultimate_cut.model.time import fraction_from_seconds
+
 FrameStepDirection = Literal["forward", "backward"]
 
 
@@ -123,16 +125,16 @@ class Player:
     @property
     def position(self) -> Fraction | None:
         value = self._mpv.time_pos
-        return None if value is None else _to_fraction(value)
+        return None if value is None else fraction_from_seconds(value)
 
     @property
     def duration(self) -> Fraction | None:
         value = self._mpv.duration
-        return None if value is None else _to_fraction(value)
+        return None if value is None else fraction_from_seconds(value)
 
     @property
     def speed(self) -> Fraction:
-        return _to_fraction(self._mpv.speed)
+        return fraction_from_seconds(self._mpv.speed)
 
     @speed.setter
     def speed(self, value: Fraction) -> None:
@@ -143,12 +145,6 @@ class Player:
         (several times a second during playback) -- drives the UI playhead."""
 
         def _handler(_name: str, value: float | None) -> None:
-            callback(None if value is None else _to_fraction(value))
+            callback(None if value is None else fraction_from_seconds(value))
 
         self._mpv.observe_property("time-pos", _handler)
-
-
-def _to_fraction(value: float) -> Fraction:
-    """Microsecond-quantized Fraction. mpv only ever reports float seconds, so
-    this is as precise as the source value actually is -- not a loss."""
-    return Fraction(round(value * 1_000_000), 1_000_000)
