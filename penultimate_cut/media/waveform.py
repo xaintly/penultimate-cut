@@ -26,18 +26,33 @@ class WaveformError(RuntimeError):
 
 
 def peaks(
-    media_path: Path, duration: Fraction, count: int, *, sample_rate: int = DEFAULT_SAMPLE_RATE
+    media_path: Path,
+    duration: Fraction,
+    count: int,
+    *,
+    start: Fraction = Fraction(0),
+    sample_rate: int = DEFAULT_SAMPLE_RATE,
 ) -> list[Peak]:
-    """Return `count` (min, max) peak pairs spanning the audio track, cached on disk."""
+    """Return `count` (min, max) peak pairs spanning `[start, start+duration)`
+    of the audio track, cached on disk.
+
+    `start` defaults to 0 (the whole file); a trimmed timeline clip passes
+    its own `source_in` so the waveform reflects what the clip actually
+    plays, not the start of the source file. Seeking to `start` uses
+    ffmpeg's fast (keyframe-approximate) seek, not the frame-exact kind --
+    fine here, since this is a visual approximation, never exported content.
+    """
     if count < 1:
         raise ValueError("count must be at least 1")
 
     cache_dir = cache_dir_for(media_path)
-    cache_path = cache_dir / f"peaks_{count}_{sample_rate}sr.bin"
+    start_us = int(start * 1_000_000)
+    duration_us = int(duration * 1_000_000)
+    cache_path = cache_dir / f"peaks_{count}_{sample_rate}sr_s{start_us}_d{duration_us}.bin"
     if cache_path.exists():
         return _read_cache(cache_path, count)
 
-    samples = _decode_pcm(media_path, sample_rate)
+    samples = _decode_pcm(media_path, sample_rate, start, duration)
     result = _bucket_peaks(samples, count)
     _write_cache(cache_path, result)
     return result
@@ -61,33 +76,20 @@ def _bucket_peaks(samples: array, count: int) -> list[Peak]:
     return result
 
 
-def _decode_pcm(media_path: Path, sample_rate: int) -> array:
+def _decode_pcm(media_path: Path, sample_rate: int, start: Fraction, duration: Fraction) -> array:
     try:
         ffmpeg = locate("ffmpeg")
     except ExecutableNotFoundError as exc:
         raise WaveformError(str(exc)) from exc
 
+    args = [ffmpeg, "-hide_banner", "-loglevel", "error"]
+    if start > 0:
+        args += ["-ss", str(float(start))]
+    args += ["-i", str(media_path), "-t", str(float(duration))]
+    args += ["-vn", "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "-"]
+
     try:
-        result = subprocess.run(
-            [
-                ffmpeg,
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                str(media_path),
-                "-vn",
-                "-ac",
-                "1",
-                "-ar",
-                str(sample_rate),
-                "-f",
-                "s16le",
-                "-",
-            ],
-            check=True,
-            capture_output=True,
-        )
+        result = subprocess.run(args, check=True, capture_output=True)
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode(errors="replace").strip()
         raise WaveformError(f"{media_path}: ffmpeg failed: {stderr}") from exc

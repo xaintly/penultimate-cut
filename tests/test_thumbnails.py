@@ -1,3 +1,4 @@
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -66,3 +67,13 @@ def test_filmstrip_rejects_non_positive_count(make_video_clip) -> None:
     info = probe(path)
     with pytest.raises(ValueError):
         filmstrip(path, info.duration, count=0)
+
+
+def test_filmstrip_start_offset_produces_different_frames(make_video_clip) -> None:
+    path = make_video_clip("filmstrip_start.mp4", duration=4.0, fps=30, size="320x240")
+
+    from_the_start = filmstrip(path, duration=Fraction(1), count=1, start=Fraction(0), width=80)
+    from_offset = filmstrip(path, duration=Fraction(1), count=1, start=Fraction(2), width=80)
+
+    assert from_the_start[0] != from_offset[0]
+    assert from_the_start[0].read_bytes() != from_offset[0].read_bytes()

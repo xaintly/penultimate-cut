@@ -27,10 +27,16 @@ def filmstrip(
     duration: Fraction,
     count: int,
     *,
+    start: Fraction = Fraction(0),
     is_still_image: bool = False,
     width: int = DEFAULT_WIDTH,
 ) -> list[Path]:
-    """Return `count` cached frame thumbnails spanning `[0, duration)`.
+    """Return `count` cached frame thumbnails spanning `[start, start+duration)`.
+
+    `start` defaults to 0 (the media bin's use: sample across the whole
+    file), but a trimmed timeline clip passes its own `source_in` here so
+    the filmstrip reflects what the clip actually shows, not the start of
+    the source file.
 
     Frames land at the midpoint of each of `count` equal segments, so a
     single thumbnail (`count=1`) comes from the middle of the clip rather
@@ -49,10 +55,12 @@ def filmstrip(
         return [out_path] * count
 
     segment = duration / count
+    start_us = int(start * 1_000_000)
+    duration_us = int(duration * 1_000_000)
     paths = []
     for index in range(count):
-        timestamp = segment * index + segment / 2
-        out_path = cache_dir / f"frame_{index}_of_{count}_{width}w.jpg"
+        timestamp = start + segment * index + segment / 2
+        out_path = cache_dir / f"frame_{index}_of_{count}_{width}w_s{start_us}_d{duration_us}.jpg"
         if not out_path.exists():
             _extract_frame(media_path, timestamp, width, out_path)
         paths.append(out_path)
