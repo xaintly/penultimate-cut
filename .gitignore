@@ -1,0 +1,25 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Project autosaves and media caches
+*.otio.autosave
+.media_cache/
+
+# Vendored binaries fetched by script (ffmpeg, ffprobe, libmpv-2.dll)
+vendor/*
+!vendor/.gitkeep
+
+# Packaging output
+packaging/build/
+packaging/dist/
+
+# OS / editor
+.DS_Store
+*.swp

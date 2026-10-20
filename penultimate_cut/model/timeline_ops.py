@@ -1,0 +1,108 @@
+"""Pure functions that transform a `Track`: split, trim, move, delete.
+
+Every function takes a `Track` and returns a *new* `Track`; none mutate their
+argument. That makes before/after snapshots trivial to capture for undo.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from fractions import Fraction
+from typing import Literal
+
+from penultimate_cut.model.project import Clip, Gap, Track, TrackItem
+
+
+class TimelineOpError(ValueError):
+    """Raised when an op can't be applied (out of range, trims past source media, etc.)."""
+
+
+def item_at(track: Track, position: Fraction) -> tuple[int, Fraction]:
+    """Return `(index, offset)` of the item spanning `position`.
+
+    `offset` is the time into that item, in `[0, item.duration)`. Raises if
+    `position` is outside the track (or exactly at its end).
+    """
+    cursor = Fraction(0)
+    for index, item in enumerate(track.items):
+        if cursor <= position < cursor + item.duration:
+            return index, position - cursor
+        cursor += item.duration
+    raise TimelineOpError(f"position {position} is outside the track (duration {cursor})")
+
+
+def split_at(track: Track, position: Fraction) -> Track:
+    """Split the clip spanning `position` into two clips at that point.
+
+    A no-op (returns `track` unchanged) if `position` lands exactly on an
+    existing item boundary — there's nothing to split.
+    """
+    index, offset = item_at(track, position)
+    item = track.items[index]
+    if offset == 0:
+        return track
+    if isinstance(item, Gap):
+        first: TrackItem = Gap(duration=offset)
+        second: TrackItem = Gap(duration=item.duration - offset)
+    else:
+        split_source = item.source_in + offset * item.speed
+        first = replace(item, source_out=split_source)
+        second = replace(item, source_in=split_source)
+    new_items = [*track.items[:index], first, second, *track.items[index + 1 :]]
+    return replace(track, items=new_items)
+
+
+def delete_item(track: Track, index: int, *, ripple: bool) -> Track:
+    """Remove `track.items[index]`.
+
+    `ripple=True` closes the gap (later items shift earlier). `ripple=False`
+    leaves a `Gap` of the same duration in its place.
+    """
+    _check_index(track, index)
+    item = track.items[index]
+    if ripple:
+        new_items = [*track.items[:index], *track.items[index + 1 :]]
+    else:
+        new_items = [*track.items[:index], Gap(duration=item.duration), *track.items[index + 1 :]]
+    return replace(track, items=new_items)
+
+
+def trim_item(track: Track, index: int, edge: Literal["start", "end"], new_time: Fraction) -> Track:
+    """Move a clip's `start` or `end` trim handle to `new_time` (in source media time).
+
+    Shifts every later item in the track, since items are stored back-to-back
+    with no absolute position (a "ripple trim"). Raises if the new handle
+    would cross the clip's other edge or go outside the source media.
+    """
+    _check_index(track, index)
+    item = track.items[index]
+    if not isinstance(item, Clip):
+        raise TimelineOpError("cannot trim a gap")
+
+    if edge == "start":
+        if not (0 <= new_time < item.source_out):
+            raise TimelineOpError("trim start must stay within the source media and before the end")
+        new_item = replace(item, source_in=new_time)
+    else:
+        if not (item.source_in < new_time <= item.media_ref.duration):
+            raise TimelineOpError("trim end must stay within the source media and after the start")
+        new_item = replace(item, source_out=new_time)
+
+    new_items = [*track.items[:index], new_item, *track.items[index + 1 :]]
+    return replace(track, items=new_items)
+
+
+def move_item(track: Track, from_index: int, to_index: int) -> Track:
+    """Reorder an item within the track (drag-to-reorder)."""
+    _check_index(track, from_index)
+    if not (0 <= to_index < len(track.items)):
+        raise TimelineOpError(f"to_index {to_index} out of range")
+    items = list(track.items)
+    item = items.pop(from_index)
+    items.insert(to_index, item)
+    return replace(track, items=items)
+
+
+def _check_index(track: Track, index: int) -> None:
+    if not (0 <= index < len(track.items)):
+        raise TimelineOpError(f"index {index} out of range for track of {len(track.items)} items")

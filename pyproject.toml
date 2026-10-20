@@ -1,0 +1,43 @@
+[project]
+name = "penultimate_cut"
+version = "0.1.0"
+description = "Penultimate Cut — a simple video editor for Windows. Not the final cut. Just the one you turn in."
+requires-python = ">=3.12"
+license = "GPL-3.0-or-later"
+dependencies = [
+    "PySide6>=6.6",
+    "python-mpv>=1.0",
+    "opentimelineio>=0.15",
+]
+
+[project.scripts]
+penultimate-cut = "penultimate_cut.app:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["penultimate_cut*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["penultimate_cut.model", "penultimate_cut.export"]
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
