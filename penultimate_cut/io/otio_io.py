@@ -30,6 +30,11 @@ from penultimate_cut.model.time import Rate, frame_to_seconds, seconds_to_frame
 METADATA_KEY = "penultimate_cut"
 SCHEMA_VERSION = 1
 
+_ADAPTER_NAME = "otio_json"
+"""Passed explicitly rather than left for OTIO to guess from the file's
+extension: the autosave path is `<project>.otio.autosave`, whose actual
+extension (`.autosave`) OTIO has no adapter for."""
+
 _FALLBACK_RATE = Fraction(30)
 """Nominal rate used only to pick a `RationalTime` value for media with no frame rate
 (audio-only, still images). Our own round-trips never depend on this value being
@@ -44,11 +49,11 @@ class LoadResult:
 
 def save_project(project: Project, path: Path) -> None:
     timeline = _project_to_timeline(project, path)
-    otio.adapters.write_to_file(timeline, str(path))
+    otio.adapters.write_to_file(timeline, str(path), adapter_name=_ADAPTER_NAME)
 
 
 def load_project(path: Path) -> LoadResult:
-    timeline = otio.adapters.read_from_file(str(path))
+    timeline = otio.adapters.read_from_file(str(path), adapter_name=_ADAPTER_NAME)
     return _timeline_to_project(timeline, path)
 
 
