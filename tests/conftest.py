@@ -20,7 +20,7 @@ def media_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture(scope="session")
 def make_video_clip(media_dir: Path):
-    """Factory fixture: `make_video_clip(name, duration=2, fps=30, size="320x240")` -> Path to an mp4."""
+    """Factory fixture: `make_video_clip(name, duration=2, fps=30, size="320x240")` -> mp4 path."""
 
     def _make(name: str, duration: float = 2.0, fps: int = 30, size: str = "320x240") -> Path:
         out_path = media_dir / name
