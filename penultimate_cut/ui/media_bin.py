@@ -89,6 +89,12 @@ class MediaBin(QWidget):
     def entries(self) -> list[MediaBinEntry]:
         return list(self._entries.values())
 
+    def clear(self) -> None:
+        """Remove every entry -- e.g. when a different project is opened,
+        whose media bears no relation to whatever was in the bin before."""
+        self._entries.clear()
+        self._list.clear()
+
     # --- import --------------------------------------------------------------
 
     def choose_files(self) -> None:
@@ -102,20 +108,38 @@ class MediaBin(QWidget):
         for path in paths:
             self._executor.submit(self._import_one, path)
 
+    def add_media_ref(self, media_ref: MediaRef) -> None:
+        """Add a `MediaRef` whose probed info is already known -- e.g. one
+        belonging to a clip in a project that was just opened -- without
+        re-probing it. Still generates a thumbnail asynchronously like a
+        normal import. A no-op if this media is already in the bin."""
+        if media_ref.id in self._entries:
+            return
+        self._executor.submit(self._build_entry, media_ref)
+
     def _import_one(self, path: Path) -> None:
         """Runs on a worker thread -- no Qt widget access here."""
         try:
             info = probe(path)
-            media_ref = _media_ref_from_info(path, info)
+        except ProbeError as exc:
+            self._signals.failed.emit(str(path), str(exc))
+            return
+        self._build_entry(_media_ref_from_info(path, info))
+
+    def _build_entry(self, media_ref: MediaRef) -> None:
+        """Runs on a worker thread -- no Qt widget access here."""
+        try:
             thumb_path = (
-                thumbnail(path, info.duration, is_still_image=info.is_still_image)
-                if info.has_video
+                thumbnail(
+                    media_ref.path, media_ref.duration, is_still_image=media_ref.is_still_image
+                )
+                if media_ref.has_video
                 else None
             )
             entry = MediaBinEntry(media_ref=media_ref, thumbnail_path=thumb_path)
             self._signals.succeeded.emit(entry)
-        except (ProbeError, ThumbnailError) as exc:
-            self._signals.failed.emit(str(path), str(exc))
+        except ThumbnailError as exc:
+            self._signals.failed.emit(str(media_ref.path), str(exc))
 
     # --- Qt slots, main thread only -------------------------------------------
 

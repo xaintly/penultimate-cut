@@ -1,8 +1,10 @@
 import time
+from fractions import Fraction
 from pathlib import Path
 
 from PySide6.QtCore import QUrl
 
+from penultimate_cut.model.project import MediaRef
 from penultimate_cut.ui.media_bin import MediaBin, MediaBinEntry
 
 
@@ -162,6 +164,69 @@ def test_drop_event_imports_dropped_files(qapp, make_video_clip) -> None:
         assert event.accepted is True
         assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
         assert media_bin.entries[0].media_ref.path == source
+    finally:
+        media_bin.shutdown()
+
+
+def test_clear_removes_all_entries(qapp, make_video_clip) -> None:
+    source = make_video_clip("mb_clear.mp4", duration=1.0, fps=30, size="320x240")
+    media_bin = MediaBin()
+    try:
+        media_bin.import_files([source])
+        assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
+
+        media_bin.clear()
+
+        assert media_bin.entries == []
+        assert media_bin._list.count() == 0
+    finally:
+        media_bin.shutdown()
+
+
+def test_add_media_ref_skips_probing_but_still_generates_thumbnail(qapp, make_video_clip) -> None:
+    source = make_video_clip("mb_add_ref.mp4", duration=2.0, fps=30, size="320x240")
+    media_ref = MediaRef(
+        path=source,
+        relative_path=None,
+        duration=Fraction(2),
+        frame_rate=Fraction(30),
+        has_video=True,
+        has_audio=True,
+        width=320,
+        height=240,
+    )
+    media_bin = MediaBin()
+    try:
+        media_bin.add_media_ref(media_ref)
+        assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
+
+        entry = media_bin.entries[0]
+        assert entry.media_ref is media_ref
+        assert entry.thumbnail_path is not None
+        assert entry.thumbnail_path.exists()
+    finally:
+        media_bin.shutdown()
+
+
+def test_add_media_ref_is_a_noop_for_an_already_present_id(qapp, make_video_clip) -> None:
+    source = make_video_clip("mb_add_ref_dup.mp4", duration=1.0, fps=30, size="320x240")
+    media_ref = MediaRef(
+        path=source,
+        relative_path=None,
+        duration=Fraction(1),
+        frame_rate=Fraction(30),
+        has_video=True,
+        has_audio=True,
+    )
+    media_bin = MediaBin()
+    try:
+        media_bin.add_media_ref(media_ref)
+        assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
+
+        media_bin.add_media_ref(media_ref)
+        qapp.processEvents()
+
+        assert len(media_bin.entries) == 1
     finally:
         media_bin.shutdown()
 
