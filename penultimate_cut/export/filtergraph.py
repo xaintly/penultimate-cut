@@ -65,7 +65,7 @@ def build_filtergraph(project: Project, resolution: ResolutionChoice = "project"
     if not track.items:
         raise FiltergraphError("nothing to export: the track is empty")
 
-    width, height = _target_resolution(project, resolution)
+    width, height = target_resolution(project, resolution)
     rate = project.frame_rate
 
     input_args: list[list[str]] = []
@@ -195,7 +195,13 @@ def _fit_stage(fit_mode: FitMode, width: int, height: int, in_label: str, out_la
     raise FiltergraphError(f"unknown fit mode: {fit_mode}")
 
 
-def _target_resolution(project: Project, resolution: ResolutionChoice) -> tuple[int, int]:
+def target_resolution(project: Project, resolution: ResolutionChoice) -> tuple[int, int]:
+    """The actual output width/height `build_filtergraph` would use for this
+    resolution choice. Public (not just an internal helper) because the
+    export dialog's live file-size estimate needs it too, and unlike
+    `build_filtergraph` it works on any project -- including an empty one,
+    via `reference_resolution`'s fallback -- rather than requiring one
+    that's actually exportable."""
     ref_width, ref_height = reference_resolution(project)
     if resolution == "project":
         return ref_width, ref_height

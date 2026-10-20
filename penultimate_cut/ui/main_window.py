@@ -21,6 +21,7 @@ the real widgets together:
 - Timeline selection -> the clip properties panel displays that clip (or
   clears itself for a gap or no selection); the panel's own Fit Mode
   control -> a `SetFitModeCommand` for whichever clip is selected.
+- Export button -> a modal `ExportDialog` for the current project.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from PySide6.QtWidgets import (
 from penultimate_cut.commands.timeline_commands import SetFitModeCommand
 from penultimate_cut.model.project import Clip, FitMode, Project, Track, default_clip_for
 from penultimate_cut.ui.clip_properties import ClipPropertiesPanel
+from penultimate_cut.ui.export_dialog import ExportDialog
 from penultimate_cut.ui.media_bin import MediaBin, MediaBinEntry
 from penultimate_cut.ui.preview_widget import PreviewWidget
 from penultimate_cut.ui.timeline.widget import TimelineWidget
@@ -88,16 +90,19 @@ class MainWindow(QMainWindow):
         self._import_button = QPushButton("Import")
         self._split_button = QPushButton("Split")
         self._delete_button = QPushButton("Delete")
+        self._add_title_button = QPushButton("Add Title")
+        self._export_button = QPushButton("Export")
         self._import_button.clicked.connect(self.media_bin.choose_files)
         self._split_button.clicked.connect(self.timeline.split_at_playhead)
         self._delete_button.clicked.connect(lambda: self.timeline.delete_selected(ripple=True))
+        self._export_button.clicked.connect(self._open_export_dialog)
 
         button_row = QHBoxLayout()
         button_row.addWidget(self._import_button)
         button_row.addWidget(self._split_button)
         button_row.addWidget(self._delete_button)
-        for label in ("Add Title", "Export"):
-            button_row.addWidget(QPushButton(label))
+        button_row.addWidget(self._add_title_button)
+        button_row.addWidget(self._export_button)
         root_layout.addLayout(button_row)
 
         self.media_bin.media_double_clicked.connect(self._on_media_double_clicked)
@@ -144,6 +149,9 @@ class MainWindow(QMainWindow):
         if self._selected_index is None:
             return
         self.undo_stack.push(SetFitModeCommand(self.project, 0, self._selected_index, fit_mode))
+
+    def _open_export_dialog(self) -> None:
+        ExportDialog(self.project, self).exec()
 
     def _refresh_clip_properties(self) -> None:
         """Re-derive the displayed clip from `_selected_index` and the

@@ -59,8 +59,12 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         assert window.media_bin is not None
         assert window.preview is not None
         assert window.timeline is not None
+        assert window.clip_properties is not None
         assert len(window.project.tracks) == 1
         assert len(window._shortcuts) == 8
+        # Not clicked: opens a modal ExportDialog, already tested on its own
+        # in test_export_dialog.py.
+        assert window._export_button.isEnabled()
 
         # Import -> double-click adds it to the timeline -> preview loads.
         window.media_bin.import_files([source])

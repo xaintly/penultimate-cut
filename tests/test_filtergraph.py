@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from penultimate_cut.export.filtergraph import FiltergraphError, build_filtergraph
+from penultimate_cut.export.filtergraph import (
+    FiltergraphError,
+    build_filtergraph,
+    target_resolution,
+)
 from penultimate_cut.media.probe import probe
 from penultimate_cut.model.project import Clip, Gap, MediaRef, Project, Track
 
@@ -78,6 +82,15 @@ def test_empty_track_rejected() -> None:
     project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[])])
     with pytest.raises(FiltergraphError):
         build_filtergraph(project)
+
+
+def test_target_resolution_works_on_an_empty_project() -> None:
+    # Unlike build_filtergraph, target_resolution has to work on a project
+    # with nothing in it yet -- the export dialog's live size estimate
+    # calls it before the user has necessarily imported anything.
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[])])
+    assert target_resolution(project, "project") == (1280, 720)
+    assert target_resolution(project, "720p") == (1280, 720)
 
 
 def test_speed_changed_clip_rejected(tmp_path: Path) -> None:
