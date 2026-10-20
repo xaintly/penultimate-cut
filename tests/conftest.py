@@ -11,6 +11,7 @@ import atexit
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -53,6 +54,15 @@ if not os.environ.get("DISPLAY"):
         atexit.register(_xvfb_process.terminate)
 
 _qapp_instance = QApplication.instance() or QApplication([])
+
+# Every MainWindow() checks the real fixed "never saved yet" autosave slot
+# at launch (io/autosave.py) and -- if anything's there -- shows a real,
+# blocking "recover it?" dialog with no one to click it. Redirect every test
+# run's autosave root to an ephemeral directory so that check can never see
+# a stray file left by a previous real run of the app, or by another test.
+_autosave_dir = tempfile.mkdtemp(prefix="penultimate_cut_test_autosave_")
+os.environ["PENULTIMATE_CUT_AUTOSAVE_DIR"] = _autosave_dir
+atexit.register(shutil.rmtree, _autosave_dir, True)
 
 
 @pytest.fixture(scope="session")

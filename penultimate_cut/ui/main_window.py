@@ -33,6 +33,17 @@ real widgets together:
   (`_offer_relink`, matching by filename via `otio_io.find_relink_candidates`)
   before it's displayed, and repopulates the media bin from everything the
   loaded project actually references.
+- Autosave: a `QTimer` writes a snapshot every 60 seconds (skipped while the
+  undo stack is clean -- nothing's changed since the last save, if any) via
+  `io/autosave.py`, plus once more right before an export starts. Launching
+  with a recoverable autosave for a never-saved project, or opening a project
+  whose own autosave is newer than it, offers to load that instead
+  (`_maybe_recover_autosave`) -- recovered content is loaded under the
+  *original* path (or none) but deliberately left dirty, since it was never
+  actually written to that path. A successful explicit save, or the user
+  choosing Discard on the unsaved-changes prompt, discards the autosave: in
+  both cases whatever it would have recovered is now either superseded or
+  explicitly unwanted.
 """
 
 from __future__ import annotations
@@ -40,8 +51,8 @@ from __future__ import annotations
 from fractions import Fraction
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut, QUndoStack
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut, QUndoCommand, QUndoStack
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -54,7 +65,18 @@ from PySide6.QtWidgets import (
 )
 
 from penultimate_cut.commands.timeline_commands import SetFitModeCommand
-from penultimate_cut.io.otio_io import find_relink_candidates, load_project, save_project
+from penultimate_cut.io.autosave import (
+    discard_autosave,
+    find_recoverable_autosave,
+    load_autosave,
+    write_autosave,
+)
+from penultimate_cut.io.otio_io import (
+    LoadResult,
+    find_relink_candidates,
+    load_project,
+    save_project,
+)
 from penultimate_cut.model.project import Clip, FitMode, MediaRef, Project, Track, default_clip_for
 from penultimate_cut.ui.clip_properties import ClipPropertiesPanel
 from penultimate_cut.ui.export_dialog import ExportDialog
@@ -63,6 +85,7 @@ from penultimate_cut.ui.preview_widget import PreviewWidget
 from penultimate_cut.ui.timeline.widget import TimelineWidget
 
 _PROJECT_FILE_FILTER = "Penultimate Cut project (*.otio)"
+_AUTOSAVE_INTERVAL_MS = 60_000
 
 
 class MainWindow(QMainWindow):
@@ -134,6 +157,15 @@ class MainWindow(QMainWindow):
         self._init_shortcuts()
         self._update_window_title()
 
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(_AUTOSAVE_INTERVAL_MS)
+        self._autosave_timer.timeout.connect(self._autosave)
+        self._autosave_timer.start()
+
+        recovered = self._maybe_recover_autosave(None)
+        if recovered is not None:
+            self._finish_loading_project(recovered, None, recovered=True)
+
     # --- menu / shortcuts ---------------------------------------------------------
 
     def _build_menu(self) -> None:
@@ -202,12 +234,10 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Couldn't open project", str(exc))
             return
 
-        if result.missing_media:
-            self._offer_relink(result.missing_media)
-
-        self._load_fresh_project(result.project, path)
-        self.media_bin.clear()
-        self._populate_media_bin_from_project(result.project)
+        recovered = self._maybe_recover_autosave(path)
+        self._finish_loading_project(
+            recovered if recovered is not None else result, path, recovered=recovered is not None
+        )
 
     def _save_project(self) -> bool:
         """Returns True if the project ended up saved (possibly after the
@@ -222,6 +252,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Couldn't save project", str(exc))
             return False
+        discard_autosave(self._current_path)
         self.undo_stack.setClean()
         self._update_window_title()
         return True
@@ -236,8 +267,15 @@ class MainWindow(QMainWindow):
         path = Path(path_str)
         if path.suffix.lower() != ".otio":
             path = path.with_suffix(".otio")
+        previous_path = self._current_path
         self._current_path = path
-        return self._save_project()
+        saved = self._save_project()
+        if saved and previous_path != path:
+            # Whatever autosave existed at the old location (the fixed
+            # "never saved yet" slot, or a different file entirely) is now
+            # orphaned -- this content has a new home.
+            discard_autosave(previous_path)
+        return saved
 
     # --- relink ------------------------------------------------------------------
 
@@ -285,6 +323,9 @@ class MainWindow(QMainWindow):
             return False
         if choice == QMessageBox.StandardButton.Save:
             return self._save_project()
+        # Discard: the user explicitly doesn't want this work recovered
+        # later either.
+        discard_autosave(self._current_path)
         return True
 
     # --- shared project-switching plumbing -----------------------------------------
@@ -300,6 +341,48 @@ class MainWindow(QMainWindow):
         self.clip_properties.set_clip(None)
         self.undo_stack.setClean()
         self._update_window_title()
+
+    def _finish_loading_project(
+        self, result: LoadResult, path: Path | None, *, recovered: bool
+    ) -> None:
+        if result.missing_media:
+            self._offer_relink(result.missing_media)
+        self._load_fresh_project(result.project, path)
+        self.media_bin.clear()
+        self._populate_media_bin_from_project(result.project)
+        if recovered:
+            # Recovered content was never actually written to `path` (or
+            # has no path at all) -- leave it dirty so the usual save
+            # prompts protect it, instead of _load_fresh_project's usual
+            # setClean() implying it's already safe on disk.
+            self.undo_stack.push(QUndoCommand("Recovered autosave"))
+
+    def _maybe_recover_autosave(self, path: Path | None) -> LoadResult | None:
+        autosave_path = find_recoverable_autosave(path)
+        if autosave_path is None:
+            return None
+        choice = QMessageBox.question(
+            self,
+            "Recover autosave",
+            "A more recent autosave was found for this project. Recover it?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            discard_autosave(path)
+            return None
+        try:
+            return load_autosave(autosave_path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Couldn't recover autosave", str(exc))
+            return None
+
+    def _autosave(self) -> None:
+        if self.undo_stack.isClean():
+            return
+        try:
+            write_autosave(self.project, self._current_path)
+        except OSError:
+            pass  # best-effort; a dialog every 60s for a transient disk issue would be worse
 
     def _populate_media_bin_from_project(self, project: Project) -> None:
         seen: set[str] = set()
@@ -339,6 +422,7 @@ class MainWindow(QMainWindow):
         self.undo_stack.push(SetFitModeCommand(self.project, 0, self._selected_index, fit_mode))
 
     def _open_export_dialog(self) -> None:
+        self._autosave()
         ExportDialog(self.project, self).exec()
 
     def _refresh_clip_properties(self) -> None:
@@ -359,6 +443,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard_if_dirty():
             event.ignore()
             return
+        self._autosave_timer.stop()
         self.media_bin.shutdown()
         self.timeline.shutdown()
         self.preview.shutdown()
