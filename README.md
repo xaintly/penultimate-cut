@@ -32,3 +32,9 @@ Lint and type-check:
 ruff check .
 mypy penultimate_cut/model penultimate_cut/export
 ```
+
+## License
+
+GPL-3.0-or-later (see `LICENSE`). The bundled ffmpeg build includes
+`libx264` for H.264 encoding, which is itself GPL-licensed -- distributing
+it requires the whole program to be GPL too.
