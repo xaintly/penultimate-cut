@@ -21,6 +21,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLa
 from penultimate_cut.model.project import Project
 from penultimate_cut.preview.edl import to_edl
 from penultimate_cut.preview.player import FrameStepDirection, Player
+from penultimate_cut.ui.format import format_duration
 
 _SLIDER_RESOLUTION = 1000
 """Seek slider steps per second of timeline -- fine enough for smooth scrubbing
@@ -129,15 +130,8 @@ class PreviewWidget(QWidget):
         if position is not None and not self._dragging:
             self._slider.setValue(int(position * _SLIDER_RESOLUTION))
 
-        self._time_label.setText(f"{_format_time(position)} / {_format_time(self._duration)}")
+        self._time_label.setText(f"{format_duration(position)} / {format_duration(self._duration)}")
 
 
 def _slider_value_to_seconds(value: int) -> Fraction:
     return Fraction(value, _SLIDER_RESOLUTION)
-
-
-def _format_time(value: Fraction | None) -> str:
-    if value is None:
-        return "00:00"
-    minutes, seconds = divmod(int(value), 60)
-    return f"{minutes:02d}:{seconds:02d}"

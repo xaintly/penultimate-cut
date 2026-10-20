@@ -1,7 +1,7 @@
 """Main window skeleton: preview (top), media bin (left), timeline (bottom).
 
-Media bin and timeline are still placeholders -- they land as Phase 1 is
-built out further. The preview widget is real.
+Timeline is still a placeholder -- it lands as Phase 1 is built out further.
+The media bin and preview widgets are real.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from penultimate_cut.ui.media_bin import MediaBin
 from penultimate_cut.ui.preview_widget import PreviewWidget
 
 
@@ -42,10 +43,11 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         root_layout = QVBoxLayout(central)
 
+        self.media_bin = MediaBin()
         self.preview = PreviewWidget()
 
         top_split = QSplitter(Qt.Orientation.Horizontal)
-        top_split.addWidget(_placeholder("Media bin"))
+        top_split.addWidget(self.media_bin)
         top_split.addWidget(self.preview)
         top_split.setStretchFactor(0, 1)
         top_split.setStretchFactor(1, 3)
@@ -58,11 +60,16 @@ class MainWindow(QMainWindow):
 
         root_layout.addWidget(main_split)
 
+        import_button = QPushButton("Import")
+        import_button.clicked.connect(self.media_bin.choose_files)
+
         button_row = QHBoxLayout()
-        for label in ("Import", "Split", "Delete", "Add Title", "Export"):
+        button_row.addWidget(import_button)
+        for label in ("Split", "Delete", "Add Title", "Export"):
             button_row.addWidget(QPushButton(label))
         root_layout.addLayout(button_row)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self.media_bin.shutdown()
         self.preview.shutdown()
         super().closeEvent(event)
