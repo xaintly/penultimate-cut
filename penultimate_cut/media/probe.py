@@ -9,12 +9,12 @@ a half-built heuristic now.
 from __future__ import annotations
 
 import json
-import platform
-import shutil
 import subprocess
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
+
+from penultimate_cut.media.executables import ExecutableNotFoundError, locate
 
 STILL_IMAGE_DURATION = Fraction(24 * 60 * 60)
 """Still images have no intrinsic duration. This stands in for "as long as you
@@ -119,9 +119,13 @@ def _ffprobe_json(path: Path) -> dict:
     if not path.exists():
         raise ProbeError(f"{path}: file does not exist")
     try:
+        ffprobe = locate("ffprobe")
+    except ExecutableNotFoundError as exc:
+        raise ProbeError(str(exc)) from exc
+    try:
         result = subprocess.run(
             [
-                _ffprobe_executable(),
+                ffprobe,
                 "-v",
                 "error",
                 "-print_format",
@@ -141,15 +145,3 @@ def _ffprobe_json(path: Path) -> dict:
     except json.JSONDecodeError as exc:
         raise ProbeError(f"{path}: could not parse ffprobe output") from exc
     return parsed
-
-
-def _ffprobe_executable() -> str:
-    """Prefer the bundled `vendor/ffprobe(.exe)`; fall back to PATH for dev machines."""
-    exe_name = "ffprobe.exe" if platform.system() == "Windows" else "ffprobe"
-    vendored = Path(__file__).resolve().parents[2] / "vendor" / exe_name
-    if vendored.exists():
-        return str(vendored)
-    found = shutil.which("ffprobe")
-    if found:
-        return found
-    raise ProbeError("ffprobe not found (expected in vendor/ or on PATH)")
