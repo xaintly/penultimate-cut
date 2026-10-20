@@ -96,3 +96,22 @@ class Project:
     @property
     def duration(self) -> Fraction:
         return max((track.duration for track in self.tracks), default=Fraction(0))
+
+
+def reference_resolution(
+    project: Project, default: tuple[int, int] = (1280, 720)
+) -> tuple[int, int]:
+    """Width/height of the first real video clip found, for things (preview gap
+    filler, export letterboxing) that need *some* resolution to work against.
+    Falls back to `default` if the project has no video clip yet."""
+    for track in project.tracks:
+        if track.kind != "video":
+            continue
+        for item in track.items:
+            if (
+                isinstance(item, Clip)
+                and item.media_ref.width is not None
+                and item.media_ref.height is not None
+            ):
+                return item.media_ref.width, item.media_ref.height
+    return default

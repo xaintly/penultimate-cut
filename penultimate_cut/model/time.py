@@ -43,3 +43,10 @@ def frame_to_seconds(frame: int, fps: Rate) -> Fraction:
 def snap_to_frame(seconds: Fraction, fps: Rate) -> Fraction:
     """Snap a time to the nearest exact frame boundary at the given rate."""
     return frame_to_seconds(seconds_to_frame(seconds, fps), fps)
+
+
+def format_seconds(value: Fraction) -> str:
+    """Decimal-seconds string for external tools (mpv EDL, ffmpeg filters) that
+    only accept floating-point timestamps. Microsecond precision is far finer
+    than any real frame boundary, so this never loses meaningful accuracy."""
+    return f"{float(value):.6f}"

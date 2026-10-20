@@ -35,12 +35,18 @@ from __future__ import annotations
 
 from fractions import Fraction
 
-from penultimate_cut.model.project import Clip, Gap, Project, TrackItem, TrackKind
+from penultimate_cut.model.project import (
+    Clip,
+    Gap,
+    Project,
+    TrackItem,
+    TrackKind,
+    reference_resolution,
+)
+from penultimate_cut.model.time import format_seconds
 
 HEADER = "# mpv EDL v0"
 
-_DEFAULT_WIDTH = 1280
-_DEFAULT_HEIGHT = 720
 _GAP_AUDIO_RATE = 48000
 
 
@@ -50,7 +56,7 @@ class EDLError(ValueError):
 
 def to_edl(project: Project) -> str:
     """Render `project` as mpv EDL text. Empty tracks are omitted."""
-    width, height = _reference_resolution(project)
+    width, height = reference_resolution(project)
     lines = [HEADER]
     for track in project.tracks:
         if not track.items:
@@ -91,30 +97,10 @@ def _gap_line(
 
 
 def _segment(file: str, start: Fraction, length: Fraction) -> str:
-    return f"file={_escape(file)},start={_seconds(start)},length={_seconds(length)}"
-
-
-def _seconds(value: Fraction) -> str:
-    return f"{float(value):.6f}"
+    return f"file={_escape(file)},start={format_seconds(start)},length={format_seconds(length)}"
 
 
 def _escape(value: str) -> str:
     """Length-prefixed EDL value form: safe for any content, incl. `,;\\n!=`."""
     byte_length = len(value.encode("utf-8"))
     return f"%{byte_length}%{value}"
-
-
-def _reference_resolution(project: Project) -> tuple[int, int]:
-    """Resolution used to size gap filler video. Only matters when a gap has
-    no real video clip anywhere nearby, since fallback is otherwise invisible."""
-    for track in project.tracks:
-        if track.kind != "video":
-            continue
-        for item in track.items:
-            if (
-                isinstance(item, Clip)
-                and item.media_ref.width is not None
-                and item.media_ref.height is not None
-            ):
-                return item.media_ref.width, item.media_ref.height
-    return _DEFAULT_WIDTH, _DEFAULT_HEIGHT
