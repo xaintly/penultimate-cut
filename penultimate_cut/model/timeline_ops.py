@@ -1,4 +1,4 @@
-"""Pure functions that transform a `Track`: split, trim, move, delete.
+"""Pure functions that transform a `Track`: split, trim, move, delete, insert.
 
 Every function takes a `Track` and returns a *new* `Track`; none mutate their
 argument. That makes before/after snapshots trivial to capture for undo.
@@ -89,6 +89,15 @@ def trim_item(track: Track, index: int, edge: Literal["start", "end"], new_time:
         new_item = replace(item, source_out=new_time)
 
     new_items = [*track.items[:index], new_item, *track.items[index + 1 :]]
+    return replace(track, items=new_items)
+
+
+def insert_item(track: Track, index: int, item: TrackItem) -> Track:
+    """Insert `item` at `index` (0..len(items), where len(items) means append
+    at the end). Used to place a newly-imported clip onto the track."""
+    if not (0 <= index <= len(track.items)):
+        raise TimelineOpError(f"index {index} out of range for track of {len(track.items)} items")
+    new_items = [*track.items[:index], item, *track.items[index:]]
     return replace(track, items=new_items)
 
 

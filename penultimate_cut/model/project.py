@@ -18,6 +18,10 @@ from penultimate_cut.model.time import Rate
 TrackKind = Literal["video", "audio"]
 FitMode = Literal["black_bars", "blurred_background", "crop_to_fill"]
 
+STILL_IMAGE_DEFAULT_DURATION = Fraction(5)
+"""A still image's default clip length when first added to a track, per
+CLAUDE.md's Phase 1 spec ("default duration (5s), adjustable by trimming")."""
+
 
 @dataclass
 class MediaRef:
@@ -96,6 +100,17 @@ class Project:
     @property
     def duration(self) -> Fraction:
         return max((track.duration for track in self.tracks), default=Fraction(0))
+
+
+def default_clip_for(media_ref: MediaRef) -> Clip:
+    """A clip spanning the media's whole natural duration, or
+    `STILL_IMAGE_DEFAULT_DURATION` for a still image (which has no natural
+    duration of its own -- `MediaRef.duration` is just a large sentinel)."""
+    if media_ref.is_still_image:
+        return Clip(
+            media_ref=media_ref, source_in=Fraction(0), source_out=STILL_IMAGE_DEFAULT_DURATION
+        )
+    return Clip(media_ref=media_ref, source_in=Fraction(0), source_out=media_ref.duration)
 
 
 def reference_resolution(

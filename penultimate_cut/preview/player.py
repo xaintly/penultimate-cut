@@ -78,8 +78,18 @@ class Player:
         that means actively decoding, which never becomes true -- and so
         never stops waiting -- if the player is paused, which it very
         routinely is right when an edit triggers a reload.
+
+        Two waits, not one, confirmed necessary by hitting the race between
+        them: `duration` is level-sensitive (it checks the *current* value
+        first), so right after calling `load_edl` a second time, it can see
+        the *previous* file's still-current, still-non-None duration and
+        return immediately -- before the new file has loaded at all. Waiting
+        for the edge-triggered `file-loaded` event first guarantees we're
+        then waiting on the new file's duration, not the old one's leftover
+        value.
         """
         try:
+            self._mpv.wait_for_event("file-loaded", timeout=timeout)
             self._mpv.wait_for_property("duration", lambda d: d is not None, timeout=timeout)
             return True
         except Exception:

@@ -6,6 +6,7 @@ from PySide6.QtGui import QUndoStack
 
 from penultimate_cut.commands.timeline_commands import (
     DeleteCommand,
+    InsertCommand,
     MoveCommand,
     SplitCommand,
     TrimCommand,
@@ -100,6 +101,21 @@ def test_move_command_and_undo_restores() -> None:
     stack.push(MoveCommand(project, 0, 0, 1))
 
     assert project.tracks[0].items == [clip_b, clip_a]
+
+    stack.undo()
+    assert project.tracks[0] is original_track
+
+
+def test_insert_command_appends_and_undo_restores() -> None:
+    clip = make_clip(duration=Fraction(5))
+    project = make_project(clip)
+    original_track = project.tracks[0]
+    new_clip = make_clip("b.mp4", duration=Fraction(3))
+    stack = QUndoStack()
+
+    stack.push(InsertCommand(project, 0, 1, new_clip))
+
+    assert project.tracks[0].items == [clip, new_clip]
 
     stack.undo()
     assert project.tracks[0] is original_track

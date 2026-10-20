@@ -7,6 +7,7 @@ from penultimate_cut.model.project import Clip, Gap, MediaRef, Track
 from penultimate_cut.model.timeline_ops import (
     TimelineOpError,
     delete_item,
+    insert_item,
     item_at,
     move_item,
     split_at,
@@ -104,3 +105,33 @@ def test_move_item_reorders() -> None:
     track = Track(kind="video", items=[clip_a, clip_b])
     new_track = move_item(track, 0, 1)
     assert new_track.items == [clip_b, clip_a]
+
+
+def test_insert_item_appends_at_end() -> None:
+    existing = make_clip(duration=Fraction(5))
+    new_clip = make_clip("b.mp4", duration=Fraction(3))
+    track = Track(kind="video", items=[existing])
+    new_track = insert_item(track, 1, new_clip)
+    assert new_track.items == [existing, new_clip]
+    assert new_track.duration == Fraction(8)
+
+
+def test_insert_item_at_start_shifts_existing() -> None:
+    existing = make_clip(duration=Fraction(5))
+    new_clip = make_clip("b.mp4", duration=Fraction(3))
+    track = Track(kind="video", items=[existing])
+    new_track = insert_item(track, 0, new_clip)
+    assert new_track.items == [new_clip, existing]
+
+
+def test_insert_item_into_empty_track() -> None:
+    new_clip = make_clip(duration=Fraction(4))
+    track = Track(kind="video", items=[])
+    new_track = insert_item(track, 0, new_clip)
+    assert new_track.items == [new_clip]
+
+
+def test_insert_item_out_of_range_raises() -> None:
+    track = Track(kind="video", items=[make_clip()])
+    with pytest.raises(TimelineOpError):
+        insert_item(track, 2, make_clip("b.mp4"))

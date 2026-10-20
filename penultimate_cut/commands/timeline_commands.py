@@ -20,7 +20,7 @@ from typing import Literal
 from PySide6.QtGui import QUndoCommand
 
 from penultimate_cut.model import timeline_ops
-from penultimate_cut.model.project import Project, Track
+from penultimate_cut.model.project import Project, Track, TrackItem
 
 
 class _TrackSwapCommand(QUndoCommand):
@@ -72,6 +72,14 @@ class TrimCommand(_TrackSwapCommand):
     ) -> None:
         new_track = timeline_ops.trim_item(project.tracks[track_index], item_index, edge, new_time)
         super().__init__("Trim", project, track_index, new_track)
+
+
+class InsertCommand(_TrackSwapCommand):
+    """Place a new clip (or gap) onto the track, e.g. from the media bin."""
+
+    def __init__(self, project: Project, track_index: int, index: int, item: TrackItem) -> None:
+        new_track = timeline_ops.insert_item(project.tracks[track_index], index, item)
+        super().__init__("Insert", project, track_index, new_track)
 
 
 class MoveCommand(_TrackSwapCommand):
