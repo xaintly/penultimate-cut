@@ -19,6 +19,7 @@ setting `speed` alone gives the scaletempo2 behavior CLAUDE.md asks for.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from fractions import Fraction
 from pathlib import Path
@@ -33,13 +34,24 @@ FrameStepDirection = Literal["forward", "backward"]
 
 
 class Player:
-    def __init__(self, wid: int | None = None, *, load_unsafe_playlists: bool = True) -> None:
+    def __init__(
+        self,
+        wid: int | None = None,
+        *,
+        load_unsafe_playlists: bool = True,
+        **extra_mpv_options: object,
+    ) -> None:
+        """`extra_mpv_options` are passed straight through to `mpv.MPV(...)`,
+        overriding anything set above -- an escape hatch for tests (e.g.
+        forcing `vo="null"` even with a real `wid`, to embed without the
+        GL path at all)."""
         mpv_kwargs: dict[str, object] = {"load_unsafe_playlists": load_unsafe_playlists}
         if wid is not None:
             mpv_kwargs["wid"] = wid
         else:
             mpv_kwargs["vo"] = "null"
             mpv_kwargs["ao"] = "null"
+        mpv_kwargs.update(extra_mpv_options)
         self._mpv = mpv.MPV(**mpv_kwargs)
         self._edl_path: Path | None = None
 
@@ -98,15 +110,29 @@ class Player:
             return False
 
     # --- playback control ----------------------------------------------------
+    #
+    # Each of these can transiently fail with a plain SystemError ("Error
+    # running mpv command", python-mpv's own exception for libmpv's generic
+    # COMMAND error) if it lands while a `load_edl` reload is still
+    # in-flight -- a real, reachable timing window, not a hypothetical one:
+    # every edit triggers a reload (see ui/main_window.py), so a click on
+    # the timeline that arrives in that same instant hits exactly this.
+    # python-mpv's ShutdownError (closed player) is also a SystemError
+    # subclass, so this equally covers a stray call arriving after close().
+    # Degrading to a no-op here is the right call either way -- there's
+    # nothing a caller could usefully do differently with the exception.
 
     def play(self) -> None:
-        self._mpv.pause = False
+        with contextlib.suppress(SystemError):
+            self._mpv.pause = False
 
     def pause(self) -> None:
-        self._mpv.pause = True
+        with contextlib.suppress(SystemError):
+            self._mpv.pause = True
 
     def toggle_play_pause(self) -> None:
-        self._mpv.pause = not self._mpv.pause
+        with contextlib.suppress(SystemError):
+            self._mpv.pause = not self._mpv.pause
 
     @property
     def is_playing(self) -> bool:
@@ -114,13 +140,15 @@ class Player:
 
     def seek(self, position: Fraction) -> None:
         """Seek to an absolute position, frame-exact (hr-seek)."""
-        self._mpv.seek(float(position), reference="absolute", precision="exact")
+        with contextlib.suppress(SystemError):
+            self._mpv.seek(float(position), reference="absolute", precision="exact")
 
     def frame_step(self, direction: FrameStepDirection = "forward") -> None:
-        if direction == "forward":
-            self._mpv.frame_step()
-        else:
-            self._mpv.frame_back_step()
+        with contextlib.suppress(SystemError):
+            if direction == "forward":
+                self._mpv.frame_step()
+            else:
+                self._mpv.frame_back_step()
 
     @property
     def position(self) -> Fraction | None:

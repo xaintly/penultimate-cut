@@ -41,3 +41,13 @@ disallow_untyped_defs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# --capture=no (-s): pytest's default fd-level capturing replaces the real
+# stdout/stderr file descriptors with pipes it reads from. mpv's own
+# background thread writes straight to the real fd for things it doesn't
+# route through its Python-visible logging at all (ALSA/pipewire/VDPAU
+# probing noise on this headless box) -- confirmed by reproducing it
+# repeatedly that combination can hang a test outright (the native thread
+# blocks writing to a pipe pytest isn't draining fast enough, and whatever
+# it's mid-call on, like a seek, never returns either). No test here uses
+# capsys/capfd, so disabling capture costs nothing.
+addopts = "-s"

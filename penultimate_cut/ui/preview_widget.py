@@ -13,6 +13,7 @@ touching widgets directly from that callback.
 
 from __future__ import annotations
 
+import contextlib
 from fractions import Fraction
 
 from PySide6.QtCore import Qt, Signal
@@ -33,7 +34,9 @@ class PreviewWidget(QWidget):
         object
     )  # Fraction | None; object avoids a C++ signal type for Fraction
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, **player_options: object) -> None:
+        """`player_options` are forwarded to `Player(...)` -- see its own
+        docstring; a test-only escape hatch, production code passes none."""
         super().__init__(parent)
 
         self._video_surface = QWidget(self)
@@ -61,7 +64,10 @@ class PreviewWidget(QWidget):
         self._dragging = False
         self._duration: Fraction | None = None
 
-        self._player = Player(wid=int(self._video_surface.winId()))
+        self._player = Player(
+            wid=int(self._video_surface.winId()),
+            **player_options,  # type: ignore[arg-type]
+        )
         self._player.on_position_changed(lambda pos: self.position_changed.emit(pos))
         self.position_changed.connect(self._on_position_changed)
 
@@ -122,6 +128,16 @@ class PreviewWidget(QWidget):
         self._player.seek(_slider_value_to_seconds(value))
 
     def _on_position_changed(self, position: Fraction | None) -> None:
+        # This callback is relayed from mpv's own event thread via a queued
+        # Qt signal; it can arrive after shutdown() has already closed the
+        # player (a real, reachable ordering -- not hypothetical), in which
+        # case reading any property raises python-mpv's ShutdownError (a
+        # SystemError subclass). Nothing useful to do with a position update
+        # for a player that's already gone, so just drop it.
+        with contextlib.suppress(SystemError):
+            self._update_for_position(position)
+
+    def _update_for_position(self, position: Fraction | None) -> None:
         duration = self._player.duration
         if duration is not None and duration != self._duration:
             self._duration = duration
