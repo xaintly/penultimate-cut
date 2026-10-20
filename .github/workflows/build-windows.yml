@@ -1,0 +1,67 @@
+name: Build Windows installer
+
+# Manual, or on a version tag (git tag v0.1.0 && git push --tags) for an
+# actual release. Not on every push to main: a PyInstaller + Inno Setup
+# build is slow and this repo's fast Linux `pytest` run (a separate concern
+# from this workflow) is the day-to-day correctness check.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project + build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+          pip install pyinstaller
+
+      - name: Fetch vendor binaries (ffmpeg, ffprobe, libmpv)
+        shell: pwsh
+        run: ./scripts/fetch_vendor.ps1
+
+      - name: Build with PyInstaller
+        run: pyinstaller packaging/penultimate_cut.spec --noconfirm
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Read project version
+        id: version
+        shell: pwsh
+        run: |
+          $content = Get-Content pyproject.toml -Raw
+          if ($content -notmatch 'version\s*=\s*"([^"]+)"') {
+            throw "Couldn't find a version in pyproject.toml"
+          }
+          echo "value=$($Matches[1])" >> $env:GITHUB_OUTPUT
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $onPath = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+          if ($onPath) {
+            $isccPath = $onPath.Source
+          } else {
+            $found = Get-ChildItem "C:\Program Files*\Inno Setup*\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            $isccPath = $found.FullName
+          }
+          if (-not $isccPath) {
+            throw "ISCC.exe not found after installing Inno Setup -- check the choco package's actual install location."
+          }
+          & $isccPath packaging/installer.iss "/DAppVersion=${{ steps.version.outputs.value }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PenultimateCut-Setup-${{ steps.version.outputs.value }}
+          path: packaging/dist/PenultimateCutSetup-*.exe
