@@ -2,7 +2,7 @@
 
 Owns the one `Project` and `QUndoStack` for the open document (Phase 1 has
 no File > New/Open yet, so this starts as a fresh empty project) and wires
-the three real widgets together:
+the real widgets together:
 
 - Media bin double-click -> a default `Clip` for that media, appended to
   the timeline via an `InsertCommand`.
@@ -15,7 +15,12 @@ the three real widgets together:
 - `QUndoStack.indexChanged` (fires on every push/undo/redo) -> reloads the
   preview's EDL, since any edit changes what it should be playing. Skipped
   while the project is empty -- an EDL with no segments at all isn't a
-  state preview/edl.py or the player have been exercised against.
+  state preview/edl.py or the player have been exercised against. Also
+  re-displays the selected clip's properties, since an edit (e.g. undoing
+  a trim) can change the very clip object `_selected_index` points at.
+- Timeline selection -> the clip properties panel displays that clip (or
+  clears itself for a gap or no selection); the panel's own Fit Mode
+  control -> a `SetFitModeCommand` for whichever clip is selected.
 """
 
 from __future__ import annotations
@@ -25,9 +30,7 @@ from fractions import Fraction
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut, QUndoStack
 from PySide6.QtWidgets import (
-    QFrame,
     QHBoxLayout,
-    QLabel,
     QMainWindow,
     QPushButton,
     QSplitter,
@@ -35,20 +38,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from penultimate_cut.model.project import Project, Track, default_clip_for
+from penultimate_cut.commands.timeline_commands import SetFitModeCommand
+from penultimate_cut.model.project import Clip, FitMode, Project, Track, default_clip_for
+from penultimate_cut.ui.clip_properties import ClipPropertiesPanel
 from penultimate_cut.ui.media_bin import MediaBin, MediaBinEntry
 from penultimate_cut.ui.preview_widget import PreviewWidget
 from penultimate_cut.ui.timeline.widget import TimelineWidget
-
-
-def _placeholder(text: str) -> QFrame:
-    frame = QFrame()
-    frame.setFrameShape(QFrame.Shape.StyledPanel)
-    layout = QVBoxLayout(frame)
-    label = QLabel(text)
-    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    layout.addWidget(label)
-    return frame
 
 
 class MainWindow(QMainWindow):
@@ -62,6 +57,7 @@ class MainWindow(QMainWindow):
 
         self.project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[])])
         self.undo_stack = QUndoStack(self)
+        self._selected_index: int | None = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -69,14 +65,17 @@ class MainWindow(QMainWindow):
 
         self.media_bin = MediaBin()
         self.preview = PreviewWidget(**preview_player_options)  # type: ignore[arg-type]
+        self.clip_properties = ClipPropertiesPanel()
         self.timeline = TimelineWidget()
         self.timeline.set_project(self.project, self.undo_stack)
 
         top_split = QSplitter(Qt.Orientation.Horizontal)
         top_split.addWidget(self.media_bin)
         top_split.addWidget(self.preview)
+        top_split.addWidget(self.clip_properties)
         top_split.setStretchFactor(0, 1)
         top_split.setStretchFactor(1, 3)
+        top_split.setStretchFactor(2, 1)
 
         main_split = QSplitter(Qt.Orientation.Vertical)
         main_split.addWidget(top_split)
@@ -105,6 +104,8 @@ class MainWindow(QMainWindow):
         self.timeline.playhead_moved.connect(self.preview.seek)
         self.preview.position_changed.connect(self._on_preview_position_changed)
         self.undo_stack.indexChanged.connect(self._on_undo_stack_changed)
+        self.timeline.selection_changed.connect(self._on_timeline_selection_changed)
+        self.clip_properties.fit_mode_changed.connect(self._on_fit_mode_changed)
 
         self._init_shortcuts()
 
@@ -133,6 +134,30 @@ class MainWindow(QMainWindow):
     def _on_undo_stack_changed(self, _index: int) -> None:
         if self.project.duration > 0:
             self.preview.load_project(self.project)
+        self._refresh_clip_properties()
+
+    def _on_timeline_selection_changed(self, index: int | None) -> None:
+        self._selected_index = index
+        self._refresh_clip_properties()
+
+    def _on_fit_mode_changed(self, fit_mode: FitMode) -> None:
+        if self._selected_index is None:
+            return
+        self.undo_stack.push(SetFitModeCommand(self.project, 0, self._selected_index, fit_mode))
+
+    def _refresh_clip_properties(self) -> None:
+        """Re-derive the displayed clip from `_selected_index` and the
+        project's current state -- needed after any edit, since e.g. undoing
+        a trim swaps in a different clip object at the same index, and a
+        delete or an edit elsewhere can make the index itself stale."""
+        clip = None
+        items = self.project.tracks[0].items
+        if self._selected_index is not None and 0 <= self._selected_index < len(items):
+            item = items[self._selected_index]
+            clip = item if isinstance(item, Clip) else None
+        else:
+            self._selected_index = None
+        self.clip_properties.set_clip(clip)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.media_bin.shutdown()
