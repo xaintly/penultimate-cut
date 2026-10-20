@@ -1,0 +1,137 @@
+"""libmpv wrapper: embeds mpv in a Qt widget, exposes seek/speed/frame-step.
+
+Keeps every mpv-specific option, property, and command name in this one
+module so `ui/preview_widget.py` never has to know mpv's API directly --
+it just calls `load_edl`, `seek`, `frame_step`, sets `speed`, etc.
+
+`wid=None` runs mpv headless (`vo=null`, `ao=null`) instead of embedding into
+a window. That's what this module's own tests use, since there's no real
+window to embed into without a visible UI; `ui/preview_widget.py` passes a
+real native window id (`int(widget.winId())`) to get actual video output.
+
+`load_unsafe_playlists` defaults to True because `preview/edl.py`'s gap
+filler uses `av://lavfi:...` entries, which mpv otherwise refuses to open.
+
+Verified empirically (not just from docs) that pitch-corrected speed change
+needs no extra configuration: `audio-pitch-correction` defaults to on, so
+setting `speed` alone gives the scaletempo2 behavior CLAUDE.md asks for.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from fractions import Fraction
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Literal
+
+import mpv
+
+FrameStepDirection = Literal["forward", "backward"]
+
+
+class Player:
+    def __init__(self, wid: int | None = None, *, load_unsafe_playlists: bool = True) -> None:
+        mpv_kwargs: dict[str, object] = {"load_unsafe_playlists": load_unsafe_playlists}
+        if wid is not None:
+            mpv_kwargs["wid"] = wid
+        else:
+            mpv_kwargs["vo"] = "null"
+            mpv_kwargs["ao"] = "null"
+        self._mpv = mpv.MPV(**mpv_kwargs)
+        self._edl_path: Path | None = None
+
+    def __enter__(self) -> Player:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._mpv.terminate()
+        if self._edl_path is not None:
+            self._edl_path.unlink(missing_ok=True)
+
+    # --- loading -----------------------------------------------------------
+
+    def load_edl(self, edl_text: str) -> None:
+        """Write `edl_text` to this player's scratch `.edl` file and load it.
+
+        Reuses the same file across calls (overwriting it) rather than
+        making a new one per edit, since the EDL is regenerated after every
+        timeline change.
+        """
+        if self._edl_path is None:
+            handle = NamedTemporaryFile(suffix=".edl", delete=False)
+            self._edl_path = Path(handle.name)
+            handle.close()
+        self._edl_path.write_text(edl_text)
+        self._mpv.play(str(self._edl_path))
+
+    def wait_until_ready(self, timeout: float = 5.0) -> bool:
+        """Block until the most recent `load_edl` has started playing, or
+        `timeout` elapses. Returns False (never raises) on timeout/failure,
+        so a bad load can be handled instead of crashing the caller."""
+        try:
+            self._mpv.wait_until_playing(timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    # --- playback control ----------------------------------------------------
+
+    def play(self) -> None:
+        self._mpv.pause = False
+
+    def pause(self) -> None:
+        self._mpv.pause = True
+
+    def toggle_play_pause(self) -> None:
+        self._mpv.pause = not self._mpv.pause
+
+    @property
+    def is_playing(self) -> bool:
+        return not bool(self._mpv.pause)
+
+    def seek(self, position: Fraction) -> None:
+        """Seek to an absolute position, frame-exact (hr-seek)."""
+        self._mpv.seek(float(position), reference="absolute", precision="exact")
+
+    def frame_step(self, direction: FrameStepDirection = "forward") -> None:
+        if direction == "forward":
+            self._mpv.frame_step()
+        else:
+            self._mpv.frame_back_step()
+
+    @property
+    def position(self) -> Fraction | None:
+        value = self._mpv.time_pos
+        return None if value is None else _to_fraction(value)
+
+    @property
+    def duration(self) -> Fraction | None:
+        value = self._mpv.duration
+        return None if value is None else _to_fraction(value)
+
+    @property
+    def speed(self) -> Fraction:
+        return _to_fraction(self._mpv.speed)
+
+    @speed.setter
+    def speed(self, value: Fraction) -> None:
+        self._mpv.speed = float(value)
+
+    def on_position_changed(self, callback: Callable[[Fraction | None], None]) -> None:
+        """Register `callback` to fire whenever mpv's playback position changes
+        (several times a second during playback) -- drives the UI playhead."""
+
+        def _handler(_name: str, value: float | None) -> None:
+            callback(None if value is None else _to_fraction(value))
+
+        self._mpv.observe_property("time-pos", _handler)
+
+
+def _to_fraction(value: float) -> Fraction:
+    """Microsecond-quantized Fraction. mpv only ever reports float seconds, so
+    this is as precise as the source value actually is -- not a loss."""
+    return Fraction(round(value * 1_000_000), 1_000_000)
