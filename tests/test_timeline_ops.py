@@ -10,6 +10,7 @@ from penultimate_cut.model.timeline_ops import (
     insert_item,
     item_at,
     move_item,
+    set_fit_mode,
     split_at,
     trim_item,
 )
@@ -135,3 +136,20 @@ def test_insert_item_out_of_range_raises() -> None:
     track = Track(kind="video", items=[make_clip()])
     with pytest.raises(TimelineOpError):
         insert_item(track, 2, make_clip("b.mp4"))
+
+
+def test_set_fit_mode_changes_only_that_field() -> None:
+    clip = make_clip(duration=Fraction(5))
+    track = Track(kind="video", items=[clip])
+    new_track = set_fit_mode(track, 0, "crop_to_fill")
+    new_clip = new_track.items[0]
+    assert new_clip.fit_mode == "crop_to_fill"
+    assert new_clip.source_in == clip.source_in
+    assert new_clip.source_out == clip.source_out
+    assert new_clip.id == clip.id
+
+
+def test_set_fit_mode_on_a_gap_raises() -> None:
+    track = Track(kind="video", items=[Gap(duration=Fraction(5))])
+    with pytest.raises(TimelineOpError):
+        set_fit_mode(track, 0, "crop_to_fill")

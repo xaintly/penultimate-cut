@@ -10,7 +10,7 @@ from dataclasses import replace
 from fractions import Fraction
 from typing import Literal
 
-from penultimate_cut.model.project import Clip, Gap, Track, TrackItem
+from penultimate_cut.model.project import Clip, FitMode, Gap, Track, TrackItem
 
 
 class TimelineOpError(ValueError):
@@ -88,6 +88,19 @@ def trim_item(track: Track, index: int, edge: Literal["start", "end"], new_time:
             raise TimelineOpError("trim end must stay within the source media and after the start")
         new_item = replace(item, source_out=new_time)
 
+    new_items = [*track.items[:index], new_item, *track.items[index + 1 :]]
+    return replace(track, items=new_items)
+
+
+def set_fit_mode(track: Track, index: int, fit_mode: FitMode) -> Track:
+    """Change a clip's Fit Mode (black bars / blurred background / crop to
+    fill) -- how it's letterboxed when its aspect ratio doesn't match the
+    project's. See CLAUDE.md's Export section."""
+    _check_index(track, index)
+    item = track.items[index]
+    if not isinstance(item, Clip):
+        raise TimelineOpError("a gap has no fit mode")
+    new_item = replace(item, fit_mode=fit_mode)
     new_items = [*track.items[:index], new_item, *track.items[index + 1 :]]
     return replace(track, items=new_items)
 

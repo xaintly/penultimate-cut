@@ -8,6 +8,7 @@ from penultimate_cut.commands.timeline_commands import (
     DeleteCommand,
     InsertCommand,
     MoveCommand,
+    SetFitModeCommand,
     SplitCommand,
     TrimCommand,
 )
@@ -116,6 +117,20 @@ def test_insert_command_appends_and_undo_restores() -> None:
     stack.push(InsertCommand(project, 0, 1, new_clip))
 
     assert project.tracks[0].items == [clip, new_clip]
+
+    stack.undo()
+    assert project.tracks[0] is original_track
+
+
+def test_set_fit_mode_command_and_undo_restores() -> None:
+    clip = make_clip(duration=Fraction(5))
+    project = make_project(clip)
+    original_track = project.tracks[0]
+    stack = QUndoStack()
+
+    stack.push(SetFitModeCommand(project, 0, 0, "blurred_background"))
+
+    assert project.tracks[0].items[0].fit_mode == "blurred_background"
 
     stack.undo()
     assert project.tracks[0] is original_track

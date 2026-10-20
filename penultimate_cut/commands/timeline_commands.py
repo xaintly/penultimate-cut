@@ -20,7 +20,7 @@ from typing import Literal
 from PySide6.QtGui import QUndoCommand
 
 from penultimate_cut.model import timeline_ops
-from penultimate_cut.model.project import Project, Track, TrackItem
+from penultimate_cut.model.project import FitMode, Project, Track, TrackItem
 
 
 class _TrackSwapCommand(QUndoCommand):
@@ -72,6 +72,16 @@ class TrimCommand(_TrackSwapCommand):
     ) -> None:
         new_track = timeline_ops.trim_item(project.tracks[track_index], item_index, edge, new_time)
         super().__init__("Trim", project, track_index, new_track)
+
+
+class SetFitModeCommand(_TrackSwapCommand):
+    """Change a clip's Fit Mode (black bars / blurred background / crop to fill)."""
+
+    def __init__(
+        self, project: Project, track_index: int, item_index: int, fit_mode: FitMode
+    ) -> None:
+        new_track = timeline_ops.set_fit_mode(project.tracks[track_index], item_index, fit_mode)
+        super().__init__("Change fit mode", project, track_index, new_track)
 
 
 class InsertCommand(_TrackSwapCommand):
