@@ -69,11 +69,18 @@ class Player:
         self._mpv.play(str(self._edl_path))
 
     def wait_until_ready(self, timeout: float = 5.0) -> bool:
-        """Block until the most recent `load_edl` has started playing, or
-        `timeout` elapses. Returns False (never raises) on timeout/failure,
-        so a bad load can be handled instead of crashing the caller."""
+        """Block until the most recent `load_edl` has finished loading (its
+        duration is known), or `timeout` elapses. Returns False (never
+        raises) on timeout/failure, so a bad load can be handled instead of
+        crashing the caller.
+
+        Deliberately not "wait until playing" (mpv's `core-idle` property):
+        that means actively decoding, which never becomes true -- and so
+        never stops waiting -- if the player is paused, which it very
+        routinely is right when an edit triggers a reload.
+        """
         try:
-            self._mpv.wait_until_playing(timeout=timeout)
+            self._mpv.wait_for_property("duration", lambda d: d is not None, timeout=timeout)
             return True
         except Exception:
             return False
