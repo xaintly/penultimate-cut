@@ -52,6 +52,30 @@ def load_project(path: Path) -> LoadResult:
     return _timeline_to_project(timeline, path)
 
 
+def find_relink_candidates(missing: list[MediaRef], search_folder: Path) -> dict[str, Path]:
+    """For each `MediaRef` in `missing`, look for a file directly inside
+    `search_folder` (not recursive) whose name matches the missing file's own
+    name. Returns `{media_ref.id: found_path}` for every match found;
+    `MediaRef`s with no match are simply absent from the result, left for the
+    caller to still report as unresolved.
+
+    Doesn't mutate anything -- relinking a `MediaRef` (setting its `.path`,
+    which immediately applies to every `Clip` sharing that same object,
+    since loading already deduplicates by id) is the caller's job. Relinking
+    isn't an edit in the undo-history sense: there's nothing a user would
+    want to undo about having pointed a broken reference at the right file.
+    """
+    by_name = {
+        candidate.name: candidate for candidate in search_folder.iterdir() if candidate.is_file()
+    }
+    matches: dict[str, Path] = {}
+    for media_ref in missing:
+        found = by_name.get(media_ref.path.name)
+        if found is not None:
+            matches[media_ref.id] = found
+    return matches
+
+
 # --- time helpers ------------------------------------------------------------
 
 

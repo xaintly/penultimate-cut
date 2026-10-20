@@ -1,7 +1,7 @@
 from fractions import Fraction
 from pathlib import Path
 
-from penultimate_cut.io.otio_io import load_project, save_project
+from penultimate_cut.io.otio_io import find_relink_candidates, load_project, save_project
 from penultimate_cut.model.project import Clip, Gap, MediaRef, Project, Track
 
 
@@ -175,3 +175,43 @@ def test_still_image_media_round_trips_with_no_frame_rate(tmp_path: Path) -> Non
     assert loaded_media.frame_rate is None
     assert loaded_media.is_still_image
     assert loaded.tracks[0].items[0].source_out == Fraction(5)
+
+
+def _missing_ref(name: str) -> MediaRef:
+    return MediaRef(
+        path=Path(f"/does/not/exist/{name}"),
+        relative_path=None,
+        duration=Fraction(5),
+        frame_rate=Fraction(30),
+        has_video=True,
+        has_audio=True,
+    )
+
+
+def test_find_relink_candidates_matches_by_filename(tmp_path: Path) -> None:
+    search_dir = tmp_path / "found_here"
+    search_dir.mkdir()
+    (search_dir / "clip_a.mp4").write_bytes(b"a")
+    (search_dir / "clip_b.mp4").write_bytes(b"b")
+
+    missing = [_missing_ref("clip_a.mp4"), _missing_ref("clip_c.mp4")]
+    matches = find_relink_candidates(missing, search_dir)
+
+    assert matches == {missing[0].id: search_dir / "clip_a.mp4"}
+
+
+def test_find_relink_candidates_does_not_search_subfolders(tmp_path: Path) -> None:
+    search_dir = tmp_path / "top"
+    search_dir.mkdir()
+    nested = search_dir / "nested"
+    nested.mkdir()
+    (nested / "clip_a.mp4").write_bytes(b"a")
+
+    missing = [_missing_ref("clip_a.mp4")]
+    assert find_relink_candidates(missing, search_dir) == {}
+
+
+def test_find_relink_candidates_returns_empty_for_no_matches(tmp_path: Path) -> None:
+    search_dir = tmp_path / "empty"
+    search_dir.mkdir()
+    assert find_relink_candidates([_missing_ref("clip_a.mp4")], search_dir) == {}
