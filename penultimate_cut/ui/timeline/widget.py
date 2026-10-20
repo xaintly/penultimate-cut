@@ -1,0 +1,598 @@
+"""Custom-painted timeline widget: one video track + its linked audio.
+
+`TimelineWidget` is a thin wrapper around `_TimelineCanvas` (the actual
+painting/mouse-handling) plus a horizontal scrollbar, kept separate so the
+canvas's own coordinate math never has to think about the scrollbar's
+geometry. All the real "what's going on" state (selection, drag, zoom,
+scroll) lives on the canvas; the outer widget mostly just forwards its
+public API down and keeps the scrollbar's range in sync.
+
+Filmstrip thumbnails and waveform peaks are generated on a background
+thread pool -- same reasoning and cross-thread-signal pattern as
+`ui/media_bin.py` -- keyed by `(clip.id, source_in, source_out)` so
+trimming a clip (same id, new range) naturally invalidates the in-memory
+cache instead of needing an explicit invalidation step; the on-disk cache
+in media/thumbnails.py and media/waveform.py is unaffected either way.
+
+Live edits during a drag (trimming, reordering) are previewed by computing
+a scratch `Track` with the real `timeline_ops` function and painting that
+instead of `project.tracks[track_index]` -- never touching the project or
+the undo stack until the mouse is released, so a drag that goes nowhere
+never produces an undo step.
+"""
+
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from fractions import Fraction
+from pathlib import Path
+from typing import Literal
+
+from PySide6.QtCore import QObject, QRect, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QPixmap,
+    QResizeEvent,
+    QUndoStack,
+)
+from PySide6.QtWidgets import QScrollBar, QSizePolicy, QVBoxLayout, QWidget
+
+from penultimate_cut.commands.timeline_commands import (
+    DeleteCommand,
+    InsertCommand,
+    MoveCommand,
+    SplitCommand,
+    TrimCommand,
+)
+from penultimate_cut.media.thumbnails import ThumbnailError, filmstrip
+from penultimate_cut.media.waveform import Peak, WaveformError, peaks
+from penultimate_cut.model.project import Clip, Gap, Project, Track, TrackItem
+from penultimate_cut.model.time import snap_to_frame
+from penultimate_cut.model.timeline_ops import TimelineOpError, move_item, trim_item
+from penultimate_cut.ui.timeline.geometry import TimelineView, hit_test, item_x_range
+
+RULER_HEIGHT = 20
+TRACK_TOP = RULER_HEIGHT
+TRACK_HEIGHT = 80
+MIN_HEIGHT = TRACK_TOP + TRACK_HEIGHT + 4
+
+DEFAULT_PIXELS_PER_SECOND = Fraction(50)
+MIN_PIXELS_PER_SECOND = Fraction(2)
+MAX_PIXELS_PER_SECOND = Fraction(500)
+ZOOM_FACTOR = Fraction(3, 2)
+
+FILMSTRIP_CACHE_COUNT = 8
+MIN_FRAME_WIDTH_PX = 40
+WAVEFORM_CACHE_COUNT = 100
+
+DRAG_THRESHOLD_PX = 4.0
+"""How far the mouse has to move, after pressing on a clip body, before a
+click turns into a reorder drag."""
+
+_TICK_INTERVALS_S = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600]
+_MIN_TICK_SPACING_PX = 50.0
+
+_RULER_BG = QColor(40, 40, 40)
+_RULER_TEXT = QColor(190, 190, 190)
+_TRACK_BG = QColor(26, 26, 26)
+_CLIP_BG = QColor(55, 85, 120)
+_CLIP_BORDER = QColor(80, 110, 150)
+_SELECTED_BORDER = QColor(255, 195, 0)
+_GAP_BG = QColor(45, 45, 45)
+_WAVEFORM_COLOR = QColor(170, 195, 220)
+_PLAYHEAD_COLOR = QColor(230, 40, 40)
+_LABEL_COLOR = QColor(235, 235, 235)
+
+
+AssetKey = tuple[str, Fraction, Fraction]
+
+
+def _asset_key(clip: Clip) -> AssetKey:
+    return (clip.id, clip.source_in, clip.source_out)
+
+
+@dataclass
+class _TrimDrag:
+    kind: Literal["trim"]
+    index: int
+    edge: Literal["start", "end"]
+    original_time: Fraction
+
+
+@dataclass
+class _ReorderDrag:
+    kind: Literal["reorder"]
+    start_index: int
+    press_x: float
+    armed: bool = False
+    target_index: int | None = None
+
+
+DragState = _TrimDrag | _ReorderDrag
+
+
+class _AsyncSignals(QObject):
+    thumbnails_ready = Signal(str, list)  # clip_id, list[Path]
+    waveform_ready = Signal(str, list)  # clip_id, list[Peak]
+    job_finished = Signal(object)  # AssetKey -- always emitted once, whatever the outcome
+
+
+class _TimelineCanvas(QWidget):
+    playhead_moved = Signal(object)  # Fraction
+    selection_changed = Signal(object)  # int | None
+    content_changed = Signal()  # project/zoom/scroll changed -> scrollbar range may need updating
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMinimumHeight(MIN_HEIGHT)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMouseTracking(True)
+
+        self._project: Project | None = None
+        self._undo_stack: QUndoStack | None = None
+        self._track_index = 0
+        self._view = TimelineView(pixels_per_second=DEFAULT_PIXELS_PER_SECOND)
+        self._playhead = Fraction(0)
+        self._selected_index: int | None = None
+        self._drag: DragState | None = None
+        self._last_mouse_x = 0.0
+
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="timeline-assets")
+        self._pending: set[AssetKey] = set()
+        self._thumbnails: dict[AssetKey, list[QPixmap]] = {}
+        self._waveforms: dict[AssetKey, list[Peak]] = {}
+        self._signals = _AsyncSignals()
+        self._signals.thumbnails_ready.connect(self._on_thumbnails_ready)
+        self._signals.waveform_ready.connect(self._on_waveform_ready)
+        self._signals.job_finished.connect(self._on_job_finished)
+
+    def shutdown(self) -> None:
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+    # --- project / track access -------------------------------------------------
+
+    def set_project(self, project: Project, undo_stack: QUndoStack, track_index: int = 0) -> None:
+        self._project = project
+        self._undo_stack = undo_stack
+        self._track_index = track_index
+        self._selected_index = None
+        self._thumbnails.clear()
+        self._waveforms.clear()
+        self._pending.clear()
+        self.content_changed.emit()
+        self.update()
+
+    @property
+    def track(self) -> Track | None:
+        if self._project is None:
+            return None
+        return self._project.tracks[self._track_index]
+
+    # --- public editing API -------------------------------------------------------
+
+    def split_at_playhead(self) -> None:
+        if self._project is None or self._undo_stack is None:
+            return
+        try:
+            self._undo_stack.push(SplitCommand(self._project, self._track_index, self._playhead))
+        except TimelineOpError:
+            pass
+
+    def delete_selected(self, *, ripple: bool) -> None:
+        if self._project is None or self._undo_stack is None or self._selected_index is None:
+            return
+        try:
+            self._undo_stack.push(
+                DeleteCommand(self._project, self._track_index, self._selected_index, ripple=ripple)
+            )
+        except TimelineOpError:
+            pass
+        self._selected_index = None
+        self.selection_changed.emit(None)
+        self.update()
+
+    def insert_clip(self, item: TrackItem, index: int | None = None) -> None:
+        track = self.track
+        if self._project is None or self._undo_stack is None or track is None:
+            return
+        target = len(track.items) if index is None else index
+        self._undo_stack.push(InsertCommand(self._project, self._track_index, target, item))
+        self.update()
+
+    def zoom_in(self) -> None:
+        self._set_zoom(self._view.pixels_per_second * ZOOM_FACTOR)
+
+    def zoom_out(self) -> None:
+        self._set_zoom(self._view.pixels_per_second / ZOOM_FACTOR)
+
+    def _set_zoom(self, pixels_per_second: Fraction) -> None:
+        clamped = max(MIN_PIXELS_PER_SECOND, min(MAX_PIXELS_PER_SECOND, pixels_per_second))
+        self._view.pixels_per_second = clamped
+        self.content_changed.emit()
+        self.update()
+
+    def set_playhead(self, position: Fraction) -> None:
+        self._playhead = max(Fraction(0), position)
+        self.update()
+
+    def set_scroll_offset(self, offset_seconds: Fraction) -> None:
+        self._view.scroll_offset = max(Fraction(0), offset_seconds)
+        self.update()
+
+    # --- painting ---------------------------------------------------------------
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), _TRACK_BG)
+        self._paint_ruler(painter)
+        track = self.track
+        if track is not None:
+            self._paint_track(painter, track)
+        self._paint_playhead(painter)
+        painter.end()
+
+    def _paint_ruler(self, painter: QPainter) -> None:
+        ruler_rect = QRect(0, 0, self.width(), RULER_HEIGHT)
+        painter.fillRect(ruler_rect, _RULER_BG)
+        interval = _ruler_tick_interval(self._view.pixels_per_second)
+        start_tick = (self._view.scroll_offset // interval) * interval
+        painter.setPen(_RULER_TEXT)
+        time = start_tick
+        while True:
+            x = self._view.x_for_time(time)
+            if x > self.width():
+                break
+            if x >= -1:
+                painter.drawLine(int(x), RULER_HEIGHT - 5, int(x), RULER_HEIGHT)
+                painter.drawText(int(x) + 3, RULER_HEIGHT - 6, _format_tick(time))
+            time += interval
+
+    def _paint_track(self, painter: QPainter, track: Track) -> None:
+        preview = self._preview_track(track)
+        for index, item in enumerate(preview.items):
+            start_x, end_x = item_x_range(preview, self._view, index)
+            if end_x < 0 or start_x > self.width():
+                continue
+            rect = QRect(int(start_x), TRACK_TOP, max(1, int(end_x - start_x)), TRACK_HEIGHT)
+            if isinstance(item, Gap):
+                self._paint_gap(painter, rect)
+            else:
+                self._paint_clip(painter, rect, item, selected=index == self._selected_index)
+
+    def _preview_track(self, track: Track) -> Track:
+        if isinstance(self._drag, _TrimDrag):
+            try:
+                return trim_item(track, self._drag.index, self._drag.edge, self._live_trim_time())
+            except TimelineOpError:
+                return track
+        if (
+            isinstance(self._drag, _ReorderDrag)
+            and self._drag.armed
+            and self._drag.target_index is not None
+        ):
+            try:
+                return move_item(track, self._drag.start_index, self._drag.target_index)
+            except TimelineOpError:
+                return track
+        return track
+
+    def _paint_gap(self, painter: QPainter, rect: QRect) -> None:
+        painter.fillRect(rect, _GAP_BG)
+        painter.setPen(QColor(70, 70, 70))
+        painter.drawRect(rect.adjusted(0, 0, -1, -1))
+
+    def _paint_clip(self, painter: QPainter, rect: QRect, clip: Clip, *, selected: bool) -> None:
+        painter.fillRect(rect, _CLIP_BG)
+        self._paint_filmstrip(painter, rect, clip)
+        self._paint_waveform(painter, rect, clip)
+        painter.setPen(_SELECTED_BORDER if selected else _CLIP_BORDER)
+        painter.drawRect(rect.adjusted(0, 0, -1, -1))
+        painter.setPen(_LABEL_COLOR)
+        label_rect = rect.adjusted(3, 1, -3, -rect.height() + 14)
+        painter.drawText(
+            label_rect,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            clip.media_ref.path.name,
+        )
+
+    def _paint_filmstrip(self, painter: QPainter, rect: QRect, clip: Clip) -> None:
+        if not clip.media_ref.has_video:
+            return
+        key = _asset_key(clip)
+        cached = self._thumbnails.get(key)
+        self._ensure_assets(clip)
+        if not cached:
+            return
+        strip_height = int(rect.height() * 0.6)
+        count = max(1, min(len(cached), int(rect.width() / MIN_FRAME_WIDTH_PX)))
+        frame_width = rect.width() / count
+        for slot in range(count):
+            source_index = round(slot * (len(cached) - 1) / max(1, count - 1))
+            pixmap = cached[source_index]
+            if pixmap.isNull():
+                continue
+            frame_rect = QRect(
+                int(rect.x() + slot * frame_width), rect.y(), int(frame_width) + 1, strip_height
+            )
+            painter.drawPixmap(frame_rect, pixmap)
+
+    def _paint_waveform(self, painter: QPainter, rect: QRect, clip: Clip) -> None:
+        if not clip.media_ref.has_audio:
+            return
+        key = _asset_key(clip)
+        cached = self._waveforms.get(key)
+        self._ensure_assets(clip)
+        if not cached:
+            return
+        wave_top = rect.y() + int(rect.height() * 0.6)
+        wave_height = rect.height() - int(rect.height() * 0.6)
+        mid_y = wave_top + wave_height // 2
+        painter.setPen(_WAVEFORM_COLOR)
+        n = len(cached)
+        for pixel in range(rect.width()):
+            sample_index = min(n - 1, int(pixel / max(1, rect.width()) * n))
+            lo, hi = cached[sample_index]
+            x = rect.x() + pixel
+            y1 = mid_y - int(hi * (wave_height / 2))
+            y2 = mid_y - int(lo * (wave_height / 2))
+            painter.drawLine(x, y1, x, max(y1, y2))
+
+    def _paint_playhead(self, painter: QPainter) -> None:
+        x = self._view.x_for_time(self._playhead)
+        if x < 0 or x > self.width():
+            return
+        painter.setPen(_PLAYHEAD_COLOR)
+        painter.drawLine(int(x), 0, int(x), self.height())
+
+    # --- async thumbnail / waveform generation -------------------------------------
+
+    def _ensure_assets(self, clip: Clip) -> None:
+        key = _asset_key(clip)
+        if key in self._pending:
+            return
+        needs_thumbnail = clip.media_ref.has_video and key not in self._thumbnails
+        needs_waveform = clip.media_ref.has_audio and key not in self._waveforms
+        if not needs_thumbnail and not needs_waveform:
+            return
+        self._pending.add(key)
+        self._executor.submit(self._generate_assets, clip)
+
+    def _generate_assets(self, clip: Clip) -> None:
+        # Runs on a worker thread. One `job_finished` at the end, always,
+        # regardless of which parts succeeded -- that's the only thing that
+        # clears `_pending`, so a clip with both video and audio can't have
+        # its still-in-flight waveform job redundantly resubmitted the
+        # moment its thumbnail part happens to land first.
+        span = clip.source_out - clip.source_in
+        if clip.media_ref.has_video:
+            try:
+                paths = filmstrip(
+                    clip.media_ref.path,
+                    span,
+                    count=FILMSTRIP_CACHE_COUNT,
+                    start=clip.source_in,
+                    is_still_image=clip.media_ref.is_still_image,
+                )
+                self._signals.thumbnails_ready.emit(clip.id, paths)
+            except ThumbnailError:
+                pass
+        if clip.media_ref.has_audio:
+            try:
+                peak_list = peaks(
+                    clip.media_ref.path, span, count=WAVEFORM_CACHE_COUNT, start=clip.source_in
+                )
+                self._signals.waveform_ready.emit(clip.id, peak_list)
+            except WaveformError:
+                pass
+        self._signals.job_finished.emit(_asset_key(clip))
+
+    def _on_thumbnails_ready(self, clip_id: str, paths: list[Path]) -> None:
+        clip = self._find_clip(clip_id)
+        if clip is None:
+            return
+        self._thumbnails[_asset_key(clip)] = [QPixmap(str(p)) for p in paths]
+        self.update()
+
+    def _on_waveform_ready(self, clip_id: str, peak_list: list[Peak]) -> None:
+        clip = self._find_clip(clip_id)
+        if clip is None:
+            return
+        self._waveforms[_asset_key(clip)] = peak_list
+        self.update()
+
+    def _on_job_finished(self, key: AssetKey) -> None:
+        self._pending.discard(key)
+
+    def _find_clip(self, clip_id: str) -> Clip | None:
+        track = self.track
+        if track is None:
+            return None
+        for item in track.items:
+            if isinstance(item, Clip) and item.id == clip_id:
+                return item
+        return None
+
+    # --- mouse interaction ---------------------------------------------------------
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        track = self.track
+        if track is None:
+            return
+        x = event.position().x()
+        self._last_mouse_x = x
+        if event.position().y() < RULER_HEIGHT:
+            self._scrub_to_x(x)
+            return
+
+        hit = hit_test(track, self._view, x)
+        if hit is None:
+            self._select(None)
+            self._scrub_to_x(x)
+            return
+
+        item = track.items[hit.index]
+        if hit.target in ("trim_start", "trim_end") and isinstance(item, Clip):
+            edge: Literal["start", "end"] = "start" if hit.target == "trim_start" else "end"
+            original = item.source_in if edge == "start" else item.source_out
+            self._drag = _TrimDrag(kind="trim", index=hit.index, edge=edge, original_time=original)
+            self._select(hit.index)
+            return
+
+        self._select(hit.index)
+        self._scrub_to_x(x)
+        self._drag = _ReorderDrag(kind="reorder", start_index=hit.index, press_x=x)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        x = event.position().x()
+        self._last_mouse_x = x
+        if isinstance(self._drag, _TrimDrag):
+            self.update()
+            return
+        if isinstance(self._drag, _ReorderDrag):
+            if not self._drag.armed and abs(x - self._drag.press_x) >= DRAG_THRESHOLD_PX:
+                self._drag.armed = True
+            if self._drag.armed:
+                self._update_reorder_target(x)
+            return
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self._scrub_to_x(x)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        track = self.track
+        if track is not None and isinstance(self._drag, _TrimDrag):
+            self._commit_trim(self._drag)
+        elif track is not None and isinstance(self._drag, _ReorderDrag) and self._drag.armed:
+            self._commit_reorder(self._drag)
+        self._drag = None
+        self.update()
+
+    def _scrub_to_x(self, x: float) -> None:
+        time = max(Fraction(0), self._view.time_for_x(x))
+        self._playhead = time
+        self.playhead_moved.emit(time)
+        self.update()
+
+    def _select(self, index: int | None) -> None:
+        self._selected_index = index
+        self.selection_changed.emit(index)
+        self.update()
+
+    def _live_trim_time(self) -> Fraction:
+        candidate = self._view.time_for_x(self._last_mouse_x)
+        fps = self._project.frame_rate if self._project is not None else Fraction(30)
+        return snap_to_frame(candidate, fps)
+
+    def _commit_trim(self, drag: _TrimDrag) -> None:
+        if self._project is None or self._undo_stack is None:
+            return
+        new_time = self._live_trim_time()
+        if new_time == drag.original_time:
+            return
+        try:
+            self._undo_stack.push(
+                TrimCommand(self._project, self._track_index, drag.index, drag.edge, new_time)
+            )
+        except TimelineOpError:
+            pass
+
+    def _update_reorder_target(self, x: float) -> None:
+        track = self.track
+        if track is None:
+            return
+        drag = self._drag
+        assert isinstance(drag, _ReorderDrag)
+        hit = hit_test(track, self._view, x)
+        drag.target_index = hit.index if hit is not None else drag.start_index
+        self.update()
+
+    def _commit_reorder(self, drag: _ReorderDrag) -> None:
+        if self._project is None or self._undo_stack is None:
+            return
+        if drag.target_index is None or drag.target_index == drag.start_index:
+            return
+        try:
+            self._undo_stack.push(
+                MoveCommand(self._project, self._track_index, drag.start_index, drag.target_index)
+            )
+        except TimelineOpError:
+            pass
+        self._selected_index = drag.target_index
+        self.selection_changed.emit(self._selected_index)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self.content_changed.emit()
+
+
+def _ruler_tick_interval(pixels_per_second: Fraction) -> Fraction:
+    for seconds in _TICK_INTERVALS_S:
+        if seconds * float(pixels_per_second) >= _MIN_TICK_SPACING_PX:
+            return Fraction(seconds)
+    return Fraction(_TICK_INTERVALS_S[-1])
+
+
+def _format_tick(time: Fraction) -> str:
+    total_seconds = int(time)
+    minutes, seconds = divmod(total_seconds, 60)
+    return f"{minutes}:{seconds:02d}"
+
+
+class TimelineWidget(QWidget):
+    playhead_moved = Signal(object)  # Fraction
+    selection_changed = Signal(object)  # int | None
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._canvas = _TimelineCanvas()
+        self._canvas.playhead_moved.connect(self.playhead_moved.emit)
+        self._canvas.selection_changed.connect(self.selection_changed.emit)
+        self._canvas.content_changed.connect(self._update_scrollbar_range)
+
+        self._scrollbar = QScrollBar(Qt.Orientation.Horizontal)
+        self._scrollbar.valueChanged.connect(self._on_scrollbar_changed)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._canvas)
+        layout.addWidget(self._scrollbar)
+
+    def shutdown(self) -> None:
+        self._canvas.shutdown()
+
+    def set_project(self, project: Project, undo_stack: QUndoStack, track_index: int = 0) -> None:
+        self._canvas.set_project(project, undo_stack, track_index)
+
+    def set_playhead(self, position: Fraction) -> None:
+        self._canvas.set_playhead(position)
+
+    def split_at_playhead(self) -> None:
+        self._canvas.split_at_playhead()
+
+    def delete_selected(self, *, ripple: bool) -> None:
+        self._canvas.delete_selected(ripple=ripple)
+
+    def insert_clip(self, item: TrackItem, index: int | None = None) -> None:
+        self._canvas.insert_clip(item, index)
+
+    def zoom_in(self) -> None:
+        self._canvas.zoom_in()
+
+    def zoom_out(self) -> None:
+        self._canvas.zoom_out()
+
+    def _update_scrollbar_range(self) -> None:
+        track = self._canvas.track
+        total_width = self._canvas._view.width_for_duration(track.duration) if track else 0.0
+        visible_width = self._canvas.width()
+        overflow = max(0, int(total_width - visible_width))
+        self._scrollbar.setRange(0, overflow)
+        self._scrollbar.setPageStep(max(1, int(visible_width)))
+
+    def _on_scrollbar_changed(self, value: int) -> None:
+        pps = self._canvas._view.pixels_per_second
+        self._canvas.set_scroll_offset(Fraction(value) / pps)
