@@ -126,5 +126,9 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         window.timeline.zoom_in()
         assert window.timeline._canvas._view.pixels_per_second > baseline
     finally:
+        # This scenario deliberately leaves the undo stack dirty (it never
+        # saves) -- mark it clean first so close() doesn't block on the
+        # real unsaved-changes prompt test_file_menu.py exercises on its own.
+        window.undo_stack.setClean()
         window.close()
         qapp.processEvents()

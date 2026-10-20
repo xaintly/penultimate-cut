@@ -1,8 +1,7 @@
 """Main window: preview (top), media bin (left), timeline (bottom).
 
-Owns the one `Project` and `QUndoStack` for the open document (Phase 1 has
-no File > New/Open yet, so this starts as a fresh empty project) and wires
-the real widgets together:
+Owns the one `Project` and `QUndoStack` for the open document and wires the
+real widgets together:
 
 - Media bin double-click -> a default `Clip` for that media, appended to
   the timeline via an `InsertCommand`.
@@ -13,26 +12,41 @@ the real widgets together:
   *visual* playhead (`set_playhead`, which doesn't itself emit
   `playhead_moved`), so this can't become a feedback loop.
 - `QUndoStack.indexChanged` (fires on every push/undo/redo) -> reloads the
-  preview's EDL, since any edit changes what it should be playing. Skipped
-  while the project is empty -- an EDL with no segments at all isn't a
-  state preview/edl.py or the player have been exercised against. Also
-  re-displays the selected clip's properties, since an edit (e.g. undoing
-  a trim) can change the very clip object `_selected_index` points at.
+  preview's EDL, since any edit changes what it should be playing (skipped
+  while the project is empty); re-displays the selected clip's properties,
+  since e.g. undoing a trim changes the very clip object `_selected_index`
+  points at; and refreshes the window title's unsaved-changes marker.
 - Timeline selection -> the clip properties panel displays that clip (or
   clears itself for a gap or no selection); the panel's own Fit Mode
   control -> a `SetFitModeCommand` for whichever clip is selected.
 - Export button -> a modal `ExportDialog` for the current project.
+- File menu: New/Open/Save/Save As, each going through
+  `_confirm_discard_if_dirty()` first if there are unsaved changes (tracked
+  via `QUndoStack`'s own clean/dirty state, set clean on every successful
+  save, new, or open). New/Open both replace `self.project` and
+  `self.undo_stack` wholesale via `_load_fresh_project()` -- which is also
+  why the Ctrl+Z/Ctrl+Y shortcuts below are wrapped in lambdas rather than
+  bound to `self.undo_stack.undo`/`.redo` directly: a bound method captured
+  once would keep calling the *original* stack's methods forever, even
+  after `self.undo_stack` has been reassigned to a different object.
+  Opening a project with missing media offers to search a folder for them
+  (`_offer_relink`, matching by filename via `otio_io.find_relink_candidates`)
+  before it's displayed, and repopulates the media bin from everything the
+  loaded project actually references.
 """
 
 from __future__ import annotations
 
 from fractions import Fraction
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut, QUndoStack
 from PySide6.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QVBoxLayout,
@@ -40,12 +54,15 @@ from PySide6.QtWidgets import (
 )
 
 from penultimate_cut.commands.timeline_commands import SetFitModeCommand
-from penultimate_cut.model.project import Clip, FitMode, Project, Track, default_clip_for
+from penultimate_cut.io.otio_io import find_relink_candidates, load_project, save_project
+from penultimate_cut.model.project import Clip, FitMode, MediaRef, Project, Track, default_clip_for
 from penultimate_cut.ui.clip_properties import ClipPropertiesPanel
 from penultimate_cut.ui.export_dialog import ExportDialog
 from penultimate_cut.ui.media_bin import MediaBin, MediaBinEntry
 from penultimate_cut.ui.preview_widget import PreviewWidget
 from penultimate_cut.ui.timeline.widget import TimelineWidget
+
+_PROJECT_FILE_FILTER = "Penultimate Cut project (*.otio)"
 
 
 class MainWindow(QMainWindow):
@@ -54,11 +71,11 @@ class MainWindow(QMainWindow):
         -- see its own docstring; a test-only escape hatch, nothing in
         normal use passes any."""
         super().__init__()
-        self.setWindowTitle("Penultimate Cut")
         self.resize(1280, 800)
 
         self.project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[])])
         self.undo_stack = QUndoStack(self)
+        self._current_path: Path | None = None
         self._selected_index: int | None = None
 
         central = QWidget()
@@ -87,6 +104,8 @@ class MainWindow(QMainWindow):
 
         root_layout.addWidget(main_split)
 
+        self._build_menu()
+
         self._import_button = QPushButton("Import")
         self._split_button = QPushButton("Split")
         self._delete_button = QPushButton("Delete")
@@ -113,6 +132,36 @@ class MainWindow(QMainWindow):
         self.clip_properties.fit_mode_changed.connect(self._on_fit_mode_changed)
 
         self._init_shortcuts()
+        self._update_window_title()
+
+    # --- menu / shortcuts ---------------------------------------------------------
+
+    def _build_menu(self) -> None:
+        file_menu = self.menuBar().addMenu("&File")
+
+        new_action = file_menu.addAction("New")
+        new_action.setShortcut(QKeySequence("Ctrl+N"))
+        new_action.triggered.connect(self._new_project)
+
+        open_action = file_menu.addAction("Open…")
+        open_action.setShortcut(QKeySequence("Ctrl+O"))
+        open_action.triggered.connect(self._open_project)
+
+        file_menu.addSeparator()
+
+        save_action = file_menu.addAction("Save")
+        save_action.setShortcut(QKeySequence("Ctrl+S"))
+        save_action.triggered.connect(self._save_project)
+
+        save_as_action = file_menu.addAction("Save As…")
+        save_as_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        save_as_action.triggered.connect(self._save_project_as)
+
+        file_menu.addSeparator()
+
+        exit_action = file_menu.addAction("Exit")
+        exit_action.setShortcut(QKeySequence("Ctrl+Q"))
+        exit_action.triggered.connect(self.close)
 
     def _init_shortcuts(self) -> None:
         shortcuts = [
@@ -120,14 +169,152 @@ class MainWindow(QMainWindow):
             ("S", self.timeline.split_at_playhead),
             ("Delete", lambda: self.timeline.delete_selected(ripple=True)),
             ("Shift+Delete", lambda: self.timeline.delete_selected(ripple=False)),
-            ("Ctrl+Z", self.undo_stack.undo),
-            ("Ctrl+Y", self.undo_stack.redo),
+            ("Ctrl+Z", lambda: self.undo_stack.undo()),
+            ("Ctrl+Y", lambda: self.undo_stack.redo()),
             ("+", self.timeline.zoom_in),
             ("-", self.timeline.zoom_out),
         ]
         self._shortcuts = [QShortcut(QKeySequence(key), self) for key, _ in shortcuts]
         for shortcut, (_key, handler) in zip(self._shortcuts, shortcuts, strict=True):
             shortcut.activated.connect(handler)
+
+    # --- File menu actions -------------------------------------------------------
+
+    def _new_project(self) -> None:
+        if not self._confirm_discard_if_dirty():
+            return
+        fresh = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[])])
+        self._load_fresh_project(fresh, path=None)
+        self.media_bin.clear()
+
+    def _open_project(self) -> None:
+        if not self._confirm_discard_if_dirty():
+            return
+        path_str, _ = QFileDialog.getOpenFileName(
+            self, "Open project", str(Path.home()), _PROJECT_FILE_FILTER
+        )
+        if not path_str:
+            return
+        path = Path(path_str)
+        try:
+            result = load_project(path)
+        except Exception as exc:  # noqa: BLE001 -- any failure here must become a dialog, not a crash
+            QMessageBox.critical(self, "Couldn't open project", str(exc))
+            return
+
+        if result.missing_media:
+            self._offer_relink(result.missing_media)
+
+        self._load_fresh_project(result.project, path)
+        self.media_bin.clear()
+        self._populate_media_bin_from_project(result.project)
+
+    def _save_project(self) -> bool:
+        """Returns True if the project ended up saved (possibly after the
+        user picked a location via Save As), False if they cancelled or the
+        save failed -- callers (e.g. the unsaved-changes prompt) use this to
+        decide whether it's safe to proceed with whatever they were about
+        to do."""
+        if self._current_path is None:
+            return self._save_project_as()
+        try:
+            save_project(self.project, self._current_path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Couldn't save project", str(exc))
+            return False
+        self.undo_stack.setClean()
+        self._update_window_title()
+        return True
+
+    def _save_project_as(self) -> bool:
+        default_path = self._current_path or (Path.home() / "Untitled.otio")
+        path_str, _ = QFileDialog.getSaveFileName(
+            self, "Save project", str(default_path), _PROJECT_FILE_FILTER
+        )
+        if not path_str:
+            return False
+        path = Path(path_str)
+        if path.suffix.lower() != ".otio":
+            path = path.with_suffix(".otio")
+        self._current_path = path
+        return self._save_project()
+
+    # --- relink ------------------------------------------------------------------
+
+    def _offer_relink(self, missing: list[MediaRef]) -> None:
+        names = "\n".join(f"• {media_ref.path.name}" for media_ref in missing)
+        choice = QMessageBox.question(
+            self,
+            "Missing media",
+            f"{len(missing)} file(s) used by this project couldn't be found:\n\n"
+            f"{names}\n\nLook for them in a folder?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+        folder_str = QFileDialog.getExistingDirectory(self, "Folder to search")
+        if not folder_str:
+            return
+        matches = find_relink_candidates(missing, Path(folder_str))
+        for media_ref in missing:
+            found = matches.get(media_ref.id)
+            if found is not None:
+                media_ref.path = found
+        QMessageBox.information(
+            self, "Relink results", f"Found {len(matches)} of {len(missing)} file(s)."
+        )
+
+    # --- unsaved-changes guard ----------------------------------------------------
+
+    def _confirm_discard_if_dirty(self) -> bool:
+        """True if it's fine to proceed (nothing unsaved, or the user chose
+        to save or explicitly discard); False if they cancelled, meaning the
+        caller should abandon whatever it was about to do."""
+        if self.undo_stack.isClean():
+            return True
+        choice = QMessageBox.warning(
+            self,
+            "Unsaved changes",
+            "This project has unsaved changes. Save before continuing?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if choice == QMessageBox.StandardButton.Cancel:
+            return False
+        if choice == QMessageBox.StandardButton.Save:
+            return self._save_project()
+        return True
+
+    # --- shared project-switching plumbing -----------------------------------------
+
+    def _load_fresh_project(self, project: Project, path: Path | None) -> None:
+        self.undo_stack.indexChanged.disconnect(self._on_undo_stack_changed)
+        self.project = project
+        self.undo_stack = QUndoStack(self)
+        self.undo_stack.indexChanged.connect(self._on_undo_stack_changed)
+        self._current_path = path
+        self._selected_index = None
+        self.timeline.set_project(self.project, self.undo_stack)
+        self.clip_properties.set_clip(None)
+        self.undo_stack.setClean()
+        self._update_window_title()
+
+    def _populate_media_bin_from_project(self, project: Project) -> None:
+        seen: set[str] = set()
+        for track in project.tracks:
+            for item in track.items:
+                if isinstance(item, Clip) and item.media_ref.id not in seen:
+                    seen.add(item.media_ref.id)
+                    self.media_bin.add_media_ref(item.media_ref)
+
+    def _update_window_title(self) -> None:
+        name = self._current_path.name if self._current_path else "Untitled"
+        dirty_marker = "" if self.undo_stack.isClean() else "*"
+        self.setWindowTitle(f"{dirty_marker}{name} — Penultimate Cut")
+
+    # --- other wiring --------------------------------------------------------------
 
     def _on_media_double_clicked(self, entry: MediaBinEntry) -> None:
         self.timeline.insert_clip(default_clip_for(entry.media_ref))
@@ -140,6 +327,7 @@ class MainWindow(QMainWindow):
         if self.project.duration > 0:
             self.preview.load_project(self.project)
         self._refresh_clip_properties()
+        self._update_window_title()
 
     def _on_timeline_selection_changed(self, index: int | None) -> None:
         self._selected_index = index
@@ -168,6 +356,9 @@ class MainWindow(QMainWindow):
         self.clip_properties.set_clip(clip)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if not self._confirm_discard_if_dirty():
+            event.ignore()
+            return
         self.media_bin.shutdown()
         self.timeline.shutdown()
         self.preview.shutdown()
