@@ -17,8 +17,8 @@ def pump_until(app, condition, timeout: float = 8.0) -> bool:
 def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
     """One flowing scenario, deliberately a single test function rather than
     several, covering the wiring this session built: construction -> import
-    -> add to timeline -> preview loads -> split -> delete -> undo/redo ->
-    zoom -> shortcuts registered.
+    -> add to timeline (double-click, then later drag-drop) -> preview
+    loads -> split -> delete -> undo/redo -> zoom -> shortcuts registered.
 
     Each of MainWindow's three real widgets owns a long-lived resource (the
     media bin's thread pool, the timeline's, and above all the preview's
@@ -120,6 +120,14 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         assert len(window.project.tracks[0].items) == 2
         window.undo_stack.redo()
         assert len(window.project.tracks[0].items) == 1
+
+        # Dragging a media bin entry onto the timeline: same as
+        # double-click, but landing at a specific index instead of always
+        # the end.
+        window.timeline.media_dropped.emit(entry.media_ref.id, 0)
+        assert len(window.project.tracks[0].items) == 2
+        assert window.project.tracks[0].items[0].duration == Fraction(4)  # the whole new clip
+        assert window.project.tracks[0].items[1].duration == Fraction(2)  # the pre-existing one
 
         # Zoom.
         baseline = window.timeline._canvas._view.pixels_per_second

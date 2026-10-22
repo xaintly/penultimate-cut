@@ -7,10 +7,20 @@ Worker threads never touch Qt widgets directly; a result comes back through
 a Qt signal, which is safe to emit cross-thread (Qt queues the connected
 slot onto the receiving object's thread automatically).
 
-Scoped to importing *into* the bin. Dragging *out* to the timeline isn't
-built yet -- the list enables `setDragEnabled` so that side is ready to
-receive once the timeline widget exists, and `media_double_clicked` is
-exposed as the other obvious hook, but nothing consumes either yet.
+Scoped to importing *into* the bin. Dragging *out* to the timeline goes
+through MEDIA_MIME_TYPE: `_MediaListWidget.mimeData()` below puts the
+dragged entry's id in that format rather than relying on Qt's own
+internal (and implementation-specific) model-index MIME format, so
+anything else -- `ui/timeline/widget.py`, currently -- can read it without
+needing to know this is a `QListWidget` at all. `media_double_clicked` is
+the other way to do the same thing.
+
+The list uses `Movement.Static`: `QListView`'s default for `IconMode` is
+free placement (drag an icon anywhere in the box, like arranging shapes in
+a photo editor), which has no purpose here -- the bin has no concept of a
+meaningful order -- and just looks broken. Static keeps items laid out in
+import order while leaving the *outgoing* drag (a completely independent
+Qt setting from in-view movement) untouched.
 """
 
 from __future__ import annotations
@@ -19,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSize, Qt, Signal
+from PySide6.QtCore import QMimeData, QObject, QSize, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -34,6 +44,11 @@ from penultimate_cut.media.probe import MediaInfo, ProbeError, probe
 from penultimate_cut.media.thumbnails import ThumbnailError, thumbnail
 from penultimate_cut.model.project import MediaRef
 from penultimate_cut.ui.format import format_duration
+
+MEDIA_MIME_TYPE = "application/x-penultimate-cut-media-id"
+"""Dragging an entry out of the media bin carries its MediaRef.id as plain
+UTF-8 bytes under this MIME type -- a small, stable contract any drop
+target can read, rather than Qt's internal item-model MIME format."""
 
 _ICON_SIZE = (140, 90)
 _FILE_FILTER = (
@@ -55,6 +70,19 @@ class _ImportSignals(QObject):
     failed = Signal(str, str)  # path, error message
 
 
+class _MediaListWidget(QListWidget):
+    """Overrides outgoing-drag MIME data to carry MEDIA_MIME_TYPE instead of
+    (or alongside) Qt's own internal format -- see module docstring."""
+
+    def mimeData(self, items: list[QListWidgetItem]) -> QMimeData:
+        mime = super().mimeData(items)
+        if items:
+            media_id = items[0].data(Qt.ItemDataRole.UserRole)
+            if media_id:
+                mime.setData(MEDIA_MIME_TYPE, str(media_id).encode("utf-8"))
+        return mime
+
+
 class MediaBin(QWidget):
     media_added = Signal(object)  # MediaBinEntry
     media_double_clicked = Signal(object)  # MediaBinEntry
@@ -69,10 +97,11 @@ class MediaBin(QWidget):
         self._signals.failed.connect(self._on_import_failed)
         self._entries: dict[str, MediaBinEntry] = {}
 
-        self._list = QListWidget()
+        self._list = _MediaListWidget()
         self._list.setViewMode(QListWidget.ViewMode.IconMode)
         self._list.setIconSize(QSize(*_ICON_SIZE))
         self._list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self._list.setMovement(QListWidget.Movement.Static)
         self._list.setWordWrap(True)
         self._list.setDragEnabled(True)
         self._list.itemDoubleClicked.connect(self._on_item_double_clicked)
@@ -88,6 +117,9 @@ class MediaBin(QWidget):
     @property
     def entries(self) -> list[MediaBinEntry]:
         return list(self._entries.values())
+
+    def get(self, media_id: str) -> MediaBinEntry | None:
+        return self._entries.get(media_id)
 
     def clear(self) -> None:
         """Remove every entry -- e.g. when a different project is opened,

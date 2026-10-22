@@ -32,6 +32,8 @@ from typing import Literal
 from PySide6.QtCore import QObject, QRect, Qt, Signal
 from PySide6.QtGui import (
     QColor,
+    QDragEnterEvent,
+    QDropEvent,
     QMouseEvent,
     QPainter,
     QPaintEvent,
@@ -53,6 +55,7 @@ from penultimate_cut.media.waveform import Peak, WaveformError, peaks
 from penultimate_cut.model.project import Clip, Gap, Project, Track, TrackItem
 from penultimate_cut.model.time import snap_to_frame
 from penultimate_cut.model.timeline_ops import TimelineOpError, move_item, trim_item
+from penultimate_cut.ui.media_bin import MEDIA_MIME_TYPE
 from penultimate_cut.ui.timeline.geometry import TimelineView, hit_test, item_x_range
 
 RULER_HEIGHT = 20
@@ -125,12 +128,14 @@ class _TimelineCanvas(QWidget):
     playhead_moved = Signal(object)  # Fraction
     selection_changed = Signal(object)  # int | None
     content_changed = Signal()  # project/zoom/scroll changed -> scrollbar range may need updating
+    media_dropped = Signal(str, int)  # media_id, insert index
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setMinimumHeight(MIN_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)
 
         self._project: Project | None = None
         self._undo_stack: QUndoStack | None = None
@@ -523,6 +528,34 @@ class _TimelineCanvas(QWidget):
         self._selected_index = drag.target_index
         self.selection_changed.emit(self._selected_index)
 
+    # --- drag and drop, media bin -> timeline ---------------------------------------
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasFormat(MEDIA_MIME_TYPE):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        data = event.mimeData().data(MEDIA_MIME_TYPE)
+        if data.isEmpty():
+            return
+        media_id = bytes(data).decode("utf-8")
+        index = self._drop_index_for_x(event.position().x())
+        self.media_dropped.emit(media_id, index)
+        event.acceptProposedAction()
+
+    def _drop_index_for_x(self, x: float) -> int:
+        """Which index a clip dropped at pixel `x` should land at: before
+        whichever existing item's nearer half it's over, or at the end if
+        it's past everything (or the track is empty)."""
+        track = self.track
+        if track is None or not track.items:
+            return 0
+        hit = hit_test(track, self._view, x)
+        if hit is None:
+            return len(track.items)
+        start_x, end_x = item_x_range(track, self._view, hit.index)
+        return hit.index if x < (start_x + end_x) / 2 else hit.index + 1
+
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self.content_changed.emit()
@@ -544,6 +577,7 @@ def _format_tick(time: Fraction) -> str:
 class TimelineWidget(QWidget):
     playhead_moved = Signal(object)  # Fraction
     selection_changed = Signal(object)  # int | None
+    media_dropped = Signal(str, int)  # media_id, insert index
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -551,6 +585,7 @@ class TimelineWidget(QWidget):
         self._canvas.playhead_moved.connect(self.playhead_moved.emit)
         self._canvas.selection_changed.connect(self.selection_changed.emit)
         self._canvas.content_changed.connect(self._update_scrollbar_range)
+        self._canvas.media_dropped.connect(self.media_dropped.emit)
 
         self._scrollbar = QScrollBar(Qt.Orientation.Horizontal)
         self._scrollbar.valueChanged.connect(self._on_scrollbar_changed)

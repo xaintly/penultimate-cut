@@ -1,11 +1,12 @@
 import time
 from fractions import Fraction
 
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QUndoStack
+from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QUndoStack
 from PySide6.QtTest import QTest
 
 from penultimate_cut.model.project import Clip, Gap, MediaRef, Project, Track
+from penultimate_cut.ui.media_bin import MEDIA_MIME_TYPE
 from penultimate_cut.ui.timeline.widget import (
     _CLIP_BG,
     _PLAYHEAD_COLOR,
@@ -392,6 +393,127 @@ def test_async_thumbnail_and_waveform_generation(qapp, make_video_clip) -> None:
         assert len(widget._canvas._thumbnails[key]) == 8
         assert len(widget._canvas._waveforms[key]) == 100
         assert key not in widget._canvas._pending
+    finally:
+        widget.shutdown()
+
+
+def test_drag_enter_with_media_mime_type_accepts(qapp) -> None:
+
+    widget = TimelineWidget()
+    try:
+        mime = QMimeData()
+        mime.setData(MEDIA_MIME_TYPE, b"some-media-id")
+        event = QDragEnterEvent(
+            QPointF(10, 10),
+            Qt.DropAction.CopyAction,
+            mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        widget._canvas.dragEnterEvent(event)
+        assert event.isAccepted()
+    finally:
+        widget.shutdown()
+
+
+def test_drag_enter_without_media_mime_type_does_not_accept(qapp) -> None:
+
+    widget = TimelineWidget()
+    try:
+        mime = QMimeData()
+        mime.setText("not a media id")
+        event = QDragEnterEvent(
+            QPointF(10, 10),
+            Qt.DropAction.CopyAction,
+            mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        widget._canvas.dragEnterEvent(event)
+        assert not event.isAccepted()
+    finally:
+        widget.shutdown()
+
+
+def _two_clip_project(source) -> Project:
+    media = make_media(source, duration=10.0)
+    clip1 = Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(5))
+    clip2 = Clip(media_ref=media, source_in=Fraction(5), source_out=Fraction(8))
+    return Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip1, clip2])])
+
+
+def test_drop_index_for_x_on_empty_track(qapp) -> None:
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[])])
+    widget = TimelineWidget()
+    try:
+        widget.set_project(project, QUndoStack())
+        assert widget._canvas._drop_index_for_x(500) == 0
+    finally:
+        widget.shutdown()
+
+
+def test_drop_index_for_x_between_and_past_clips(qapp, make_video_clip) -> None:
+    source = make_video_clip("tlw_drop_index.mp4", duration=10.0, fps=30, size="320x240")
+    project = _two_clip_project(source)
+    widget = TimelineWidget()
+    try:
+        widget.set_project(project, QUndoStack())
+        # pixels_per_second defaults to 50: clip1 spans 0-250px, clip2 spans 250-400px.
+        assert widget._canvas._drop_index_for_x(50) == 0  # first half of clip1
+        assert widget._canvas._drop_index_for_x(200) == 1  # second half of clip1
+        assert widget._canvas._drop_index_for_x(300) == 1  # first half of clip2
+        assert widget._canvas._drop_index_for_x(350) == 2  # second half of clip2
+        assert widget._canvas._drop_index_for_x(1000) == 2  # past everything
+    finally:
+        widget.shutdown()
+
+
+def test_drop_event_emits_media_dropped_with_computed_index(qapp, make_video_clip) -> None:
+
+    source = make_video_clip("tlw_drop_event.mp4", duration=10.0, fps=30, size="320x240")
+    project = _two_clip_project(source)
+    widget = TimelineWidget()
+    try:
+        widget.set_project(project, QUndoStack())
+        received = []
+        widget.media_dropped.connect(lambda media_id, index: received.append((media_id, index)))
+
+        mime = QMimeData()
+        mime.setData(MEDIA_MIME_TYPE, b"the-media-id")
+        event = QDropEvent(
+            QPointF(350, 40),
+            Qt.DropAction.CopyAction,
+            mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        widget._canvas.dropEvent(event)
+
+        assert received == [("the-media-id", 2)]
+        assert event.isAccepted()
+    finally:
+        widget.shutdown()
+
+
+def test_drop_event_without_media_mime_type_does_nothing(qapp) -> None:
+
+    widget = TimelineWidget()
+    try:
+        received = []
+        widget.media_dropped.connect(lambda media_id, index: received.append((media_id, index)))
+
+        mime = QMimeData()
+        mime.setText("unrelated")
+        event = QDropEvent(
+            QPointF(10, 10),
+            Qt.DropAction.CopyAction,
+            mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        widget._canvas.dropEvent(event)
+
+        assert received == []
     finally:
         widget.shutdown()
 

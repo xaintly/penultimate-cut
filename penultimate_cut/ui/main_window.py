@@ -4,7 +4,12 @@ Owns the one `Project` and `QUndoStack` for the open document and wires the
 real widgets together:
 
 - Media bin double-click -> a default `Clip` for that media, appended to
-  the timeline via an `InsertCommand`.
+  the timeline via an `InsertCommand`. Dragging a media bin entry onto the
+  timeline does the same thing, landing at wherever was dropped instead of
+  always the end -- `TimelineWidget.media_dropped` carries the media's id
+  (not a `MediaRef` itself: the timeline widget has no reason to know
+  about the media bin's entries) and the drop index it already computed
+  from the drop position.
 - Timeline click/drag -> seeks the preview; the preview's own position
   (moving during playback) -> moves the timeline's playhead. Only the
   user-driven direction (`TimelineWidget.playhead_moved`) feeds the other
@@ -148,6 +153,7 @@ class MainWindow(QMainWindow):
         root_layout.addLayout(button_row)
 
         self.media_bin.media_double_clicked.connect(self._on_media_double_clicked)
+        self.timeline.media_dropped.connect(self._on_media_dropped)
         self.timeline.playhead_moved.connect(self.preview.seek)
         self.preview.position_changed.connect(self._on_preview_position_changed)
         self.undo_stack.indexChanged.connect(self._on_undo_stack_changed)
@@ -401,6 +407,11 @@ class MainWindow(QMainWindow):
 
     def _on_media_double_clicked(self, entry: MediaBinEntry) -> None:
         self.timeline.insert_clip(default_clip_for(entry.media_ref))
+
+    def _on_media_dropped(self, media_id: str, index: int) -> None:
+        entry = self.media_bin.get(media_id)
+        if entry is not None:
+            self.timeline.insert_clip(default_clip_for(entry.media_ref), index=index)
 
     def _on_preview_position_changed(self, position: Fraction | None) -> None:
         if position is not None:

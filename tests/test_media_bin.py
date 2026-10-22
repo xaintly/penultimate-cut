@@ -3,9 +3,10 @@ from fractions import Fraction
 from pathlib import Path
 
 from PySide6.QtCore import QUrl
+from PySide6.QtWidgets import QListWidget
 
 from penultimate_cut.model.project import MediaRef
-from penultimate_cut.ui.media_bin import MediaBin, MediaBinEntry
+from penultimate_cut.ui.media_bin import MEDIA_MIME_TYPE, MediaBin, MediaBinEntry
 
 
 def pump_until(app, condition, timeout: float = 8.0) -> bool:
@@ -227,6 +228,45 @@ def test_add_media_ref_is_a_noop_for_an_already_present_id(qapp, make_video_clip
         qapp.processEvents()
 
         assert len(media_bin.entries) == 1
+    finally:
+        media_bin.shutdown()
+
+
+def test_list_items_do_not_move_freely(qapp) -> None:
+    media_bin = MediaBin()
+    try:
+        assert media_bin._list.movement() == QListWidget.Movement.Static
+    finally:
+        media_bin.shutdown()
+
+
+def test_dragging_an_entry_carries_its_media_id(qapp, make_video_clip) -> None:
+    source = make_video_clip("mb_drag.mp4", duration=1.0, fps=30, size="320x240")
+    media_bin = MediaBin()
+    try:
+        media_bin.import_files([source])
+        assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
+        entry = media_bin.entries[0]
+
+        item = media_bin._list.item(0)
+        mime = media_bin._list.mimeData([item])
+
+        assert mime.hasFormat(MEDIA_MIME_TYPE)
+        assert bytes(mime.data(MEDIA_MIME_TYPE)).decode("utf-8") == entry.media_ref.id
+    finally:
+        media_bin.shutdown()
+
+
+def test_get_looks_up_an_entry_by_media_id(qapp, make_video_clip) -> None:
+    source = make_video_clip("mb_get.mp4", duration=1.0, fps=30, size="320x240")
+    media_bin = MediaBin()
+    try:
+        media_bin.import_files([source])
+        assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
+        entry = media_bin.entries[0]
+
+        assert media_bin.get(entry.media_ref.id) is entry
+        assert media_bin.get("no-such-id") is None
     finally:
         media_bin.shutdown()
 
