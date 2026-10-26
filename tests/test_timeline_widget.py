@@ -649,3 +649,42 @@ def test_filmstrip_tiles_follow_video_shape() -> None:
     assert _filmstrip_frame_count(200, Fraction(1, 10)) == 10
     assert _filmstrip_frame_count(10, Fraction(16, 9)) == 1
     assert _filmstrip_frame_count(10**6, Fraction(16, 9)) == 80
+
+
+def test_right_drag_scrolls_and_right_click_opens_menu(qapp, make_video_clip, monkeypatch) -> None:
+    source = make_video_clip("tlw_pan.mp4", duration=30.0, fps=30, size="320x240")
+    project = make_project(source, duration=30.0)
+    stack = QUndoStack()
+
+    widget = TimelineWidget()
+    try:
+        widget.resize(400, 150)
+        widget.set_project(project, stack)
+        widget.show()
+        qapp.processEvents()
+        canvas = widget._canvas
+        menus: list[float] = []
+        monkeypatch.setattr(canvas, "_show_context_menu", lambda x, _pos: menus.append(x))
+        right, none = Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier
+        y = TRACK_TOP + 10
+
+        # Drag left 200px: the view moves 200px (4s at 50px/s) later.
+        QTest.mousePress(canvas, right, none, QPoint(300, y))
+        QTest.mouseMove(canvas, QPoint(100, y))
+        QTest.mouseRelease(canvas, right, none, QPoint(100, y))
+        assert canvas._view.scroll_offset == Fraction(4)
+        assert menus == []
+
+        # Drag right 50px: back 1s.
+        QTest.mousePress(canvas, right, none, QPoint(100, y))
+        QTest.mouseMove(canvas, QPoint(150, y))
+        QTest.mouseRelease(canvas, right, none, QPoint(150, y))
+        assert canvas._view.scroll_offset == Fraction(3)
+
+        # A right-click without dragging opens the menu instead.
+        QTest.mousePress(canvas, right, none, QPoint(120, y))
+        QTest.mouseRelease(canvas, right, none, QPoint(120, y))
+        assert menus == [120]
+        assert stack.count() == 0  # right-dragging a clip never moves it
+    finally:
+        widget.shutdown()

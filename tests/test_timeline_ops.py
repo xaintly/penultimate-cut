@@ -1,3 +1,4 @@
+from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from penultimate_cut.model.timeline_ops import (
     item_at,
     move_item,
     remove_gaps,
+    remove_media,
     set_fit_mode,
     split_at,
     trim_item,
@@ -200,3 +202,15 @@ def test_set_fit_mode_on_a_gap_raises() -> None:
     track = Track(kind="video", items=[Gap(duration=Fraction(5))])
     with pytest.raises(TimelineOpError):
         set_fit_mode(track, 0, "crop_to_fill")
+
+
+def test_remove_media_leaves_empty_space_for_its_clips() -> None:
+    keep = make_clip("keep.mp4", duration=Fraction(2))
+    gone_a = make_clip("gone.mp4", duration=Fraction(3))
+    gone_b = replace(gone_a, id="other-clip-same-media")
+    track = Track(kind="video", items=[gone_a, keep, Gap(duration=Fraction(1)), gone_b])
+    new_track = remove_media(track, gone_a.media_ref.id)
+    # Leading clip -> gap; the trailing gap + clip vanish entirely.
+    assert len(new_track.items) == 2
+    assert isinstance(new_track.items[0], Gap) and new_track.items[0].duration == Fraction(3)
+    assert new_track.items[1] is keep

@@ -64,6 +64,23 @@ class DeleteCommand(_TrackSwapCommand):
         super().__init__(text, project, track_index, new_track)
 
 
+class RemoveMediaCommand(QUndoCommand):
+    """Remove every clip of one media file, on every track (leaving empty
+    space) -- when that media is removed from the project's media bin."""
+
+    def __init__(self, project: Project, media_id: str) -> None:
+        super().__init__("Remove media")
+        self._project = project
+        self._old_tracks = list(project.tracks)
+        self._new_tracks = [timeline_ops.remove_media(track, media_id) for track in project.tracks]
+
+    def redo(self) -> None:
+        self._project.tracks[:] = self._new_tracks
+
+    def undo(self) -> None:
+        self._project.tracks[:] = self._old_tracks
+
+
 class RemoveGapsCommand(_TrackSwapCommand):
     """Close up every stretch of empty space in the track."""
 

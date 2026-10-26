@@ -185,6 +185,12 @@ space**. Selecting empty space and pressing Delete also closes it.
 | Ctrl+S | Save |
 | Home / End | Jump to start / end |
 
+On the timeline, **right-click and drag** scrolls (the content follows the mouse);
+a right-click without dragging opens the menu. Left-drag stays reserved for moving
+and trimming clips. In the media bin, Delete or right-click → **Remove from project**
+removes media: silently if no clip uses it, otherwise after a confirmation (its clips
+may be off-screen), as one undoable edit.
+
 ---
 
 ## Export

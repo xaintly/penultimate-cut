@@ -29,12 +29,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QMimeData, QObject, QSize, Qt, Signal
+from PySide6.QtCore import QMimeData, QObject, QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon
 from PySide6.QtWidgets import (
     QFileDialog,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QStyle,
     QVBoxLayout,
     QWidget,
@@ -86,6 +87,11 @@ class _MediaListWidget(QListWidget):
 class MediaBin(QWidget):
     media_added = Signal(object)  # MediaBinEntry
     media_double_clicked = Signal(object)  # MediaBinEntry
+    remove_requested = Signal(object)  # MediaBinEntry
+    """The user asked to remove this media (Delete key or right-click). The
+    bin doesn't remove it itself: the owner decides (it may be on the
+    timeline, which needs a confirmation and an undoable edit), then calls
+    `remove()`."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -96,6 +102,8 @@ class MediaBin(QWidget):
         self._signals.succeeded.connect(self._on_import_succeeded)
         self._signals.failed.connect(self._on_import_failed)
         self._entries: dict[str, MediaBinEntry] = {}
+        self._building: set[str] = set()
+        """Media ids whose entry is still being built on a worker thread."""
 
         self._list = _MediaListWidget()
         self._list.setViewMode(QListWidget.ViewMode.IconMode)
@@ -105,6 +113,8 @@ class MediaBin(QWidget):
         self._list.setWordWrap(True)
         self._list.setDragEnabled(True)
         self._list.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._on_context_menu)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._list, 1)
@@ -127,6 +137,40 @@ class MediaBin(QWidget):
         self._entries.clear()
         self._list.clear()
 
+    def remove(self, media_id: str) -> None:
+        self._entries.pop(media_id, None)
+        for row in range(self._list.count()):
+            if self._list.item(row).data(Qt.ItemDataRole.UserRole) == media_id:
+                self._list.takeItem(row)
+                return
+
+    def has_focus(self) -> bool:
+        return self._list.hasFocus()
+
+    def request_remove_selected(self) -> None:
+        """Delete key: ask to remove the selected media (see `remove_requested`)."""
+        item = self._list.currentItem()
+        if item is not None and item.isSelected():
+            self._request_remove(item)
+
+    def _request_remove(self, item: QListWidgetItem) -> None:
+        media_id = item.data(Qt.ItemDataRole.UserRole)
+        entry = self._entries.get(media_id) if media_id else None
+        if entry is None:
+            # A failed import ("Couldn't import ...") -- nothing to ask about.
+            self._list.takeItem(self._list.row(item))
+            return
+        self.remove_requested.emit(entry)
+
+    def _on_context_menu(self, pos: QPoint) -> None:
+        item = self._list.itemAt(pos)
+        if item is None:
+            return
+        # Parented to the top-level window: see TimelineWidget's menu.
+        menu = QMenu(self.window())
+        menu.addAction("Remove from project").triggered.connect(lambda: self._request_remove(item))
+        menu.exec(self._list.viewport().mapToGlobal(pos))
+
     # --- import --------------------------------------------------------------
 
     def choose_files(self) -> None:
@@ -145,8 +189,9 @@ class MediaBin(QWidget):
         belonging to a clip in a project that was just opened -- without
         re-probing it. Still generates a thumbnail asynchronously like a
         normal import. A no-op if this media is already in the bin."""
-        if media_ref.id in self._entries:
+        if media_ref.id in self._entries or media_ref.id in self._building:
             return
+        self._building.add(media_ref.id)
         self._executor.submit(self._build_entry, media_ref)
 
     def _import_one(self, path: Path) -> None:
@@ -176,6 +221,9 @@ class MediaBin(QWidget):
     # --- Qt slots, main thread only -------------------------------------------
 
     def _on_import_succeeded(self, entry: MediaBinEntry) -> None:
+        self._building.discard(entry.media_ref.id)
+        if entry.media_ref.id in self._entries:
+            return
         self._entries[entry.media_ref.id] = entry
         icon = QIcon(str(entry.thumbnail_path)) if entry.thumbnail_path else self._audio_icon()
         item = QListWidgetItem(icon, _label_for(entry.media_ref))

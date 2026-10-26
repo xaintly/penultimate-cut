@@ -29,7 +29,7 @@ from typing import Literal
 
 import mpv
 
-from penultimate_cut.model.time import fraction_from_seconds
+from penultimate_cut.model.time import format_seconds, fraction_from_seconds
 
 FrameStepDirection = Literal["forward", "backward"]
 
@@ -46,7 +46,13 @@ class Player:
         overriding anything set above -- an escape hatch for tests (e.g.
         forcing `vo="null"` even with a real `wid`, to embed without the
         GL path at all)."""
-        mpv_kwargs: dict[str, object] = {"load_unsafe_playlists": load_unsafe_playlists}
+        mpv_kwargs: dict[str, object] = {
+            "load_unsafe_playlists": load_unsafe_playlists,
+            # Stay paused on the last frame at the end of the timeline. mpv's
+            # default unloads the file there and goes idle, after which play
+            # and seek silently do nothing until the next edit reloads it.
+            "keep_open": "yes",
+        }
         if wid is not None:
             mpv_kwargs["wid"] = wid
             if sys.platform == "win32":
@@ -85,8 +91,12 @@ class Player:
 
     # --- loading -----------------------------------------------------------
 
-    def load_edl(self, edl_text: str) -> None:
-        """Write `edl_text` to this player's scratch `.edl` file and load it.
+    def load_edl(self, edl_text: str, start: Fraction = Fraction(0)) -> None:
+        """Write `edl_text` to this player's scratch `.edl` file and load it,
+        positioned at `start` -- so reloading after an edit can keep the
+        playhead where it was, instead of jumping back to the beginning (a
+        seek issued right after loading is dropped while the load is still
+        in flight, so this has to be part of the load itself).
 
         Reuses the same file across calls (overwriting it) rather than
         making a new one per edit, since the EDL is regenerated after every
@@ -104,7 +114,12 @@ class Player:
             self._edl_path = Path(handle.name)
             handle.close()
         self._edl_path.write_text(edl_text, encoding="utf-8", newline="\n")
-        self._mpv.play(str(self._edl_path))
+        self._mpv.loadfile(str(self._edl_path), start=format_seconds(start))
+
+    def unload(self) -> None:
+        """Stop and show nothing -- e.g. when the timeline becomes empty."""
+        with contextlib.suppress(SystemError):
+            self._mpv.command("stop")
 
     def wait_until_ready(self, timeout: float = 5.0) -> bool:
         """Block until the most recent `load_edl` has finished loading (its
@@ -147,7 +162,10 @@ class Player:
     # nothing a caller could usefully do differently with the exception.
 
     def play(self) -> None:
+        """Resume playback -- from the start, if it had reached the end."""
         with contextlib.suppress(SystemError):
+            if self._mpv.eof_reached:
+                self._mpv.seek(0, reference="absolute", precision="exact")
             self._mpv.pause = False
 
     def pause(self) -> None:
@@ -156,7 +174,10 @@ class Player:
 
     def toggle_play_pause(self) -> None:
         with contextlib.suppress(SystemError):
-            self._mpv.pause = not self._mpv.pause
+            if self._mpv.pause:
+                self.play()
+            else:
+                self.pause()
 
     @property
     def is_playing(self) -> bool:
@@ -200,3 +221,13 @@ class Player:
             callback(None if value is None else fraction_from_seconds(value))
 
         self._mpv.observe_property("time-pos", _handler)
+
+    def on_playing_changed(self, callback: Callable[[bool], None]) -> None:
+        """Register `callback(is_playing)` to fire whenever playback starts
+        or stops -- including mpv pausing itself at the end of the timeline,
+        which no caller asked for."""
+
+        def _handler(_name: str, paused: bool | None) -> None:
+            callback(not paused)
+
+        self._mpv.observe_property("pause", _handler)

@@ -30,7 +30,7 @@ real widgets together:
   via `QUndoStack`'s own clean/dirty state, set clean on every successful
   save, new, or open). New/Open both replace `self.project` and
   `self.undo_stack` wholesale via `_load_fresh_project()` -- which is also
-  why the Ctrl+Z/Ctrl+Y shortcuts below are wrapped in lambdas rather than
+  why the Edit menu's Undo/Redo actions are wrapped in lambdas rather than
   bound to `self.undo_stack.undo`/`.redo` directly: a bound method captured
   once would keep calling the *original* stack's methods forever, even
   after `self.undo_stack` has been reassigned to a different object.
@@ -69,7 +69,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from penultimate_cut.commands.timeline_commands import SetFitModeCommand
+from penultimate_cut.commands.timeline_commands import RemoveMediaCommand, SetFitModeCommand
 from penultimate_cut.io.autosave import (
     discard_autosave,
     find_recoverable_autosave,
@@ -153,6 +153,7 @@ class MainWindow(QMainWindow):
         root_layout.addLayout(button_row)
 
         self.media_bin.media_double_clicked.connect(self._on_media_double_clicked)
+        self.media_bin.remove_requested.connect(self._on_media_remove_requested)
         self.timeline.media_dropped.connect(self._on_media_dropped)
         self.timeline.playhead_moved.connect(self.preview.seek)
         self.preview.position_changed.connect(self._on_preview_position_changed)
@@ -162,6 +163,7 @@ class MainWindow(QMainWindow):
 
         self._init_shortcuts()
         self._update_window_title()
+        self._update_edit_actions()
 
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setInterval(_AUTOSAVE_INTERVAL_MS)
@@ -201,14 +203,24 @@ class MainWindow(QMainWindow):
         exit_action.setShortcut(QKeySequence("Ctrl+Q"))
         exit_action.triggered.connect(self.close)
 
+        # Plain actions calling whatever `self.undo_stack` is *now*, not
+        # QUndoStack.createUndoAction(): that binds to one stack object, and
+        # New/Open replace the stack (same reason as the lambdas in
+        # _init_shortcuts). `_update_edit_actions` keeps text/enabled current.
+        edit_menu = self.menuBar().addMenu("&Edit")
+        self._undo_action = edit_menu.addAction("Undo")
+        self._undo_action.setShortcut(QKeySequence("Ctrl+Z"))
+        self._undo_action.triggered.connect(lambda: self.undo_stack.undo())
+        self._redo_action = edit_menu.addAction("Redo")
+        self._redo_action.setShortcut(QKeySequence("Ctrl+Y"))
+        self._redo_action.triggered.connect(lambda: self.undo_stack.redo())
+
     def _init_shortcuts(self) -> None:
         shortcuts = [
             ("Space", self.preview.toggle_play_pause),
             ("S", self.timeline.split_at_playhead),
-            ("Delete", lambda: self.timeline.delete_selected(ripple=False)),
+            ("Delete", self._on_delete_key),
             ("Shift+Delete", lambda: self.timeline.delete_selected(ripple=True)),
-            ("Ctrl+Z", lambda: self.undo_stack.undo()),
-            ("Ctrl+Y", lambda: self.undo_stack.redo()),
             ("+", self.timeline.zoom_in),
             ("-", self.timeline.zoom_out),
         ]
@@ -344,9 +356,20 @@ class MainWindow(QMainWindow):
         self._current_path = path
         self._selected_index = None
         self.timeline.set_project(self.project, self.undo_stack)
+        self.timeline.set_playhead(Fraction(0))
+        self._reload_preview()
         self.clip_properties.set_clip(None)
         self.undo_stack.setClean()
         self._update_window_title()
+        self._update_edit_actions()
+
+    def _reload_preview(self) -> None:
+        if self.project.duration > 0:
+            # Keep the preview where the playhead is; a reload otherwise
+            # starts from 0:00 and drags the timeline's playhead with it.
+            self.preview.load_project(self.project, start=self.timeline.playhead)
+        else:
+            self.preview.clear()  # not still showing the last deleted clip
 
     def _finish_loading_project(
         self, result: LoadResult, path: Path | None, *, recovered: bool
@@ -403,6 +426,14 @@ class MainWindow(QMainWindow):
         dirty_marker = "" if self.undo_stack.isClean() else "*"
         self.setWindowTitle(f"{dirty_marker}{name} — Penultimate Cut")
 
+    def _update_edit_actions(self) -> None:
+        for action, verb, available, text in (
+            (self._undo_action, "Undo", self.undo_stack.canUndo(), self.undo_stack.undoText()),
+            (self._redo_action, "Redo", self.undo_stack.canRedo(), self.undo_stack.redoText()),
+        ):
+            action.setEnabled(available)
+            action.setText(f"{verb} {text}" if available and text else verb)
+
     # --- other wiring --------------------------------------------------------------
 
     def _on_media_double_clicked(self, entry: MediaBinEntry) -> None:
@@ -418,10 +449,54 @@ class MainWindow(QMainWindow):
             self.timeline.set_playhead(position)
 
     def _on_undo_stack_changed(self, _index: int) -> None:
-        if self.project.duration > 0:
-            self.preview.load_project(self.project)
+        self._reload_preview()
         self._refresh_clip_properties()
         self._update_window_title()
+        self._update_edit_actions()
+        # Undoing a "Remove media" brings its clips back; their media must
+        # come back to the bin too. (A no-op for media already there.)
+        self._populate_media_bin_from_project(self.project)
+
+    def _on_delete_key(self) -> None:
+        if self.media_bin.has_focus():
+            self.media_bin.request_remove_selected()
+        else:
+            self.timeline.delete_selected(ripple=False)
+
+    def _on_media_remove_requested(self, entry: MediaBinEntry) -> None:
+        """Unused media goes silently. Media with clips on the timeline asks
+        first -- those clips may be off-screen, so removing them wouldn't be
+        obvious -- then removes them as one undoable edit."""
+        media_id = entry.media_ref.id
+        clip_count = sum(
+            1
+            for track in self.project.tracks
+            for item in track.items
+            if isinstance(item, Clip) and item.media_ref.id == media_id
+        )
+        if clip_count and not self._confirm_remove_used_media(
+            entry.media_ref.path.name, clip_count
+        ):
+            return
+        self.media_bin.remove(media_id)
+        if clip_count:
+            self.undo_stack.push(RemoveMediaCommand(self.project, media_id))
+
+    def _confirm_remove_used_media(self, name: str, clip_count: int) -> bool:
+        plural = "clip" if clip_count == 1 else "clips"
+        box = QMessageBox(
+            QMessageBox.Icon.Question,
+            "Remove media",
+            f"“{name}” is used by {clip_count} {plural} on the timeline. "
+            f"Removing it also removes the {plural}.\n\n"
+            "You can undo this with Edit → Undo.",
+            QMessageBox.StandardButton.Cancel,
+            self,
+        )
+        remove_button = box.addButton("Remove", QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        return box.clickedButton() is remove_button
 
     def _on_timeline_selection_changed(self, index: int | None) -> None:
         self._selected_index = index

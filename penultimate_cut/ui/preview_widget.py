@@ -33,6 +33,7 @@ class PreviewWidget(QWidget):
     position_changed = Signal(
         object
     )  # Fraction | None; object avoids a C++ signal type for Fraction
+    _playing_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None, **player_options: object) -> None:
         """`player_options` are forwarded to `Player(...)` -- see its own
@@ -41,11 +42,11 @@ class PreviewWidget(QWidget):
 
         self._video_surface = QWidget(self)
         # Making this native also makes its ancestors (and, in turn, their
-        # siblings -- nearly the whole main window) native. That's behind
-        # Qt's occasional harmless console warning "QWidgetWindow(...
-        # TimelineWidgetClassWindow) must be a top level window". Don't
-        # "fix" it with WA_DontCreateNativeAncestors: tried, and embedded
-        # mpv then intermittently hangs the app at load.
+        # siblings -- nearly the whole main window) native. A popup menu
+        # parented to one of those makes Qt warn "QWidgetWindow(...) must be
+        # a top level window", so parent menus to `self.window()` instead.
+        # Don't "fix" the cascade with WA_DontCreateNativeAncestors: tried,
+        # and embedded mpv then intermittently hangs the app at load.
         self._video_surface.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         self._video_surface.setStyleSheet("background-color: black;")
 
@@ -76,6 +77,12 @@ class PreviewWidget(QWidget):
         )
         self._player.on_position_changed(lambda pos: self.position_changed.emit(pos))
         self.position_changed.connect(self._on_position_changed)
+        # Same cross-thread relay, so the button label follows mpv's actual
+        # state -- e.g. mpv pausing itself at the end of the timeline.
+        self._player.on_playing_changed(lambda playing: self._playing_changed.emit(playing))
+        self._playing_changed.connect(self._on_playing_changed)
+        # mpv starts unpaused; with nothing loaded the button would say "Pause".
+        self._player.pause()
 
         self._play_button.clicked.connect(self.toggle_play_pause)
         self._back_button.clicked.connect(lambda: self.frame_step("backward"))
@@ -98,21 +105,24 @@ class PreviewWidget(QWidget):
 
     # --- project loading ---------------------------------------------------------
 
-    def load_project(self, project: Project) -> None:
-        self._player.load_edl(to_edl(project))
+    def load_project(self, project: Project, start: Fraction = Fraction(0)) -> None:
+        """Load `project` (paused), positioned at `start`."""
+        self._player.load_edl(to_edl(project), start=min(start, project.duration))
         # mpv starts playing a freshly loaded file immediately (its `pause`
         # property defaults to False and loading a new file doesn't change
         # it) -- confirmed this reliably sticks even without waiting for the
         # load to finish. Without this, every edit (every `load_project`
         # call, since `MainWindow` reloads on every undo-stack change) would
-        # silently resume playback the user never asked for, while this
-        # widget's own Play/Pause button -- which only updates its label from
-        # explicit play()/pause()/toggle_play_pause() calls, never from mpv's
-        # actual state -- would still say "Play", so the first press of it
-        # would silently *pause* the already-playing video instead of
-        # starting it.
+        # silently resume playback the user never asked for.
         self._player.pause()
         self._play_button.setText("Play")
+
+    def clear(self) -> None:
+        """Show nothing: the timeline is empty."""
+        self._player.unload()
+        self._duration = None
+        self._slider.setRange(0, 0)
+        self._time_label.setText(f"{format_duration(None)} / {format_duration(None)}")
 
     # --- transport ----------------------------------------------------------------
 
@@ -145,6 +155,9 @@ class PreviewWidget(QWidget):
 
     def _on_slider_moved(self, value: int) -> None:
         self._player.seek(_slider_value_to_seconds(value))
+
+    def _on_playing_changed(self, playing: bool) -> None:
+        self._play_button.setText("Pause" if playing else "Play")
 
     def _on_position_changed(self, position: Fraction | None) -> None:
         # This callback is relayed from mpv's own event thread via a queued

@@ -74,10 +74,21 @@ def delete_item(track: Track, index: int, *, ripple: bool) -> Track:
         new_items = [*track.items[:index], *track.items[index + 1 :]]
     else:
         new_items = [*track.items[:index], Gap(duration=item.duration), *track.items[index + 1 :]]
-        new_items = _merge_adjacent_gaps(new_items)
-        while new_items and isinstance(new_items[-1], Gap):
-            new_items.pop()
+        new_items = _tidy_gaps(new_items)
     return replace(track, items=new_items)
+
+
+def remove_media(track: Track, media_id: str) -> Track:
+    """Replace every clip of the media `media_id` with empty space -- the
+    same as deleting each one (without ripple). For removing that media
+    from the project entirely."""
+    new_items: list[TrackItem] = [
+        Gap(duration=item.duration)
+        if isinstance(item, Clip) and item.media_ref.id == media_id
+        else item
+        for item in track.items
+    ]
+    return replace(track, items=_tidy_gaps(new_items))
 
 
 def remove_gaps(track: Track) -> Track:
@@ -85,7 +96,8 @@ def remove_gaps(track: Track) -> Track:
     return replace(track, items=[item for item in track.items if not isinstance(item, Gap)])
 
 
-def _merge_adjacent_gaps(items: list[TrackItem]) -> list[TrackItem]:
+def _tidy_gaps(items: list[TrackItem]) -> list[TrackItem]:
+    """Merge adjacent gaps into one, and drop empty space at the very end."""
     merged: list[TrackItem] = []
     for item in items:
         previous = merged[-1] if merged else None
@@ -93,6 +105,8 @@ def _merge_adjacent_gaps(items: list[TrackItem]) -> list[TrackItem]:
             merged[-1] = replace(previous, duration=previous.duration + item.duration)
         else:
             merged.append(item)
+    while merged and isinstance(merged[-1], Gap):
+        merged.pop()
     return merged
 
 

@@ -34,10 +34,9 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Literal
 
-from PySide6.QtCore import QObject, QRect, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QRect, Qt, Signal
 from PySide6.QtGui import (
     QColor,
-    QContextMenuEvent,
     QDragEnterEvent,
     QDropEvent,
     QMouseEvent,
@@ -158,6 +157,16 @@ class _ReorderDrag:
 DragState = _TrimDrag | _ReorderDrag
 
 
+@dataclass
+class _Pan:
+    """A right-button press: a drag scrolls the view, a click opens the menu."""
+
+    press_x: float
+    start_px: float
+    """Scroll position (pixels from the timeline's start) at the press."""
+    moved: bool = False
+
+
 class _AsyncSignals(QObject):
     thumbnails_ready = Signal(object, list)  # ThumbnailKey, list[Path]
     waveform_ready = Signal(object, list)  # WaveformKey, list[Peak]
@@ -169,6 +178,7 @@ class _TimelineCanvas(QWidget):
     selection_changed = Signal(object)  # int | None
     content_changed = Signal()  # project/zoom/scroll changed -> scrollbar range may need updating
     media_dropped = Signal(str, int)  # media_id, insert index
+    scroll_requested = Signal(int)  # pixels from the timeline's start
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -176,6 +186,11 @@ class _TimelineCanvas(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
+        # Take focus on click, so the Delete key acts on whichever of the
+        # timeline and the media bin was clicked last.
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self._pan: _Pan | None = None
 
         self._project: Project | None = None
         self._undo_stack: QUndoStack | None = None
@@ -476,6 +491,12 @@ class _TimelineCanvas(QWidget):
             return
         x = event.position().x()
         self._last_mouse_x = x
+        if event.button() == Qt.MouseButton.RightButton:
+            start_px = float(self._view.scroll_offset * self._view.pixels_per_second)
+            self._pan = _Pan(press_x=x, start_px=start_px)
+            return
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
         if event.position().y() < RULER_HEIGHT:
             self._scrub_to_x(x)
             return
@@ -507,6 +528,15 @@ class _TimelineCanvas(QWidget):
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         x = event.position().x()
         self._last_mouse_x = x
+        if self._pan is not None:
+            moved = x - self._pan.press_x
+            if not self._pan.moved and abs(moved) >= DRAG_THRESHOLD_PX:
+                self._pan.moved = True
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            if self._pan.moved:
+                # Content follows the mouse: dragging right reveals earlier time.
+                self.scroll_requested.emit(int(self._pan.start_px - moved))
+            return
         if isinstance(self._drag, _TrimDrag):
             self.update()
             return
@@ -520,6 +550,12 @@ class _TimelineCanvas(QWidget):
             self._scrub_to_x(x)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.RightButton:
+            pan, self._pan = self._pan, None
+            self.unsetCursor()
+            if pan is not None and not pan.moved:
+                self._show_context_menu(event.position().x(), event.globalPosition().toPoint())
+            return
         track = self.track
         if track is not None and isinstance(self._drag, _TrimDrag):
             self._commit_trim(self._drag)
@@ -593,24 +629,33 @@ class _TimelineCanvas(QWidget):
         self.selection_changed.emit(self._selected_index)
 
     # --- right-click menu ----------------------------------------------------------
+    #
+    # Shown on right-button *release*, and only if the mouse didn't move:
+    # right-drag scrolls the timeline instead (see mouseMoveEvent). Qt's own
+    # context-menu event is disabled (PreventContextMenu) since it can't
+    # tell a click from a drag.
 
-    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+    def _show_context_menu(self, x: float, global_pos: QPoint) -> None:
         track = self.track
         if track is None:
             return
-        hit = hit_test(track, self._view, event.pos().x())
+        hit = hit_test(track, self._view, x)
         gap_index = (
             hit.index if hit is not None and isinstance(track.items[hit.index], Gap) else None
         )
 
-        menu = QMenu(self)
+        # Parented to the top-level window, not this widget: the embedded
+        # video preview makes most of the main window's widgets native, and
+        # Qt warns "... must be a top level window" when a popup's parent is
+        # one of those (see ui/preview_widget.py).
+        menu = QMenu(self.window())
         if gap_index is not None:
             delete_gap = menu.addAction("Delete empty space")
             delete_gap.triggered.connect(lambda: self.delete_gap(gap_index))
         delete_all = menu.addAction("Delete all empty space")
         delete_all.setEnabled(any(isinstance(item, Gap) for item in track.items))
         delete_all.triggered.connect(self.delete_all_gaps)
-        menu.exec(event.globalPos())
+        menu.exec(global_pos)
 
     def delete_gap(self, index: int) -> None:
         if self._project is None or self._undo_stack is None:
@@ -682,8 +727,13 @@ class TimelineWidget(QWidget):
         self._canvas.selection_changed.connect(self.selection_changed.emit)
         self._canvas.content_changed.connect(self._update_scrollbar_range)
         self._canvas.media_dropped.connect(self.media_dropped.emit)
+        self._canvas.scroll_requested.connect(lambda px: self._scrollbar.setValue(px))
 
         self._scrollbar = QScrollBar(Qt.Orientation.Horizontal)
+        # Qt's built-in "Scroll here / Left edge / ..." menu triggers the same
+        # "must be a top level window" warning as our own menus would (see
+        # _show_context_menu), and right-drag on the timeline covers it.
+        self._scrollbar.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         self._scrollbar.valueChanged.connect(self._on_scrollbar_changed)
 
         layout = QVBoxLayout(self)
@@ -697,6 +747,10 @@ class TimelineWidget(QWidget):
 
     def set_project(self, project: Project, undo_stack: QUndoStack, track_index: int = 0) -> None:
         self._canvas.set_project(project, undo_stack, track_index)
+
+    @property
+    def playhead(self) -> Fraction:
+        return self._canvas._playhead
 
     def set_playhead(self, position: Fraction) -> None:
         """Move the visual playhead (driven by the preview during playback).

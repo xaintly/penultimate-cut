@@ -183,3 +183,35 @@ def test_wait_until_ready_returns_false_on_bad_edl() -> None:
     with Player() as player:
         player.load_edl("# mpv EDL v0\n")  # no segments at all
         assert player.wait_until_ready(timeout=2) is False
+
+
+def test_play_after_reaching_the_end_restarts(make_video_clip) -> None:
+    # Regression: mpv used to unload the file at the end of the timeline and
+    # go idle, after which play and seek silently did nothing at all.
+    source = make_video_clip("player_eof.mp4", duration=3.0, fps=30, size="320x240")
+    with Player() as player:
+        player.load_edl(to_edl(make_project(source, duration=1.0)))
+        assert player.wait_until_ready()
+        player.play()
+        deadline = time.monotonic() + 5
+        while player.is_playing and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not player.is_playing  # paused itself on the last frame
+        assert player.position is not None
+
+        player.play()
+        time.sleep(0.3)
+        assert player.is_playing
+        position = player.position
+        assert position is not None and position < Fraction(1)
+
+
+def test_load_edl_can_start_mid_timeline(make_video_clip) -> None:
+    # Reloading after an edit must keep the playhead where it was, not
+    # snap back to 0:00 (a seek right after loading would be dropped).
+    source = make_video_clip("player_start.mp4", duration=3.0, fps=30, size="320x240")
+    with Player() as player:
+        player.load_edl(to_edl(make_project(source, duration=3.0)), start=Fraction(2))
+        assert player.wait_until_ready()
+        position = player.position
+        assert position is not None and abs(position - 2) < Fraction(1, 10)

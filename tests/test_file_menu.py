@@ -152,6 +152,9 @@ def test_open_project_loads_clips_onto_the_timeline(
         assert window.undo_stack.isClean()
         assert window.windowTitle() == "existing.otio — Penultimate Cut"
         assert pump_until(qapp, lambda: len(window.media_bin.entries) == 1)
+        # The preview loads the opened project right away -- not only after
+        # the first edit (play/pause did nothing until then).
+        assert pump_until(qapp, lambda: window.preview.player.duration == Fraction(3))
     finally:
         window.undo_stack.setClean()
         window.close()

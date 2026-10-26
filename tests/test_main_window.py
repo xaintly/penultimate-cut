@@ -62,7 +62,12 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         assert window.timeline is not None
         assert window.clip_properties is not None
         assert len(window.project.tracks) == 1
-        assert len(window._shortcuts) == 8
+        assert len(window._shortcuts) == 6
+        # Undo/Redo live in the Edit menu (with their Ctrl+Z/Ctrl+Y
+        # shortcuts), disabled while there's nothing to undo/redo.
+        assert window._undo_action.shortcut().toString() == "Ctrl+Z"
+        assert window._redo_action.shortcut().toString() == "Ctrl+Y"
+        assert not window._undo_action.isEnabled()
         # Not clicked: opens a modal ExportDialog, already tested on its own
         # in test_export_dialog.py.
         assert window._export_button.isEnabled()
@@ -147,6 +152,56 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         # This scenario deliberately leaves the undo stack dirty (it never
         # saves) -- mark it clean first so close() doesn't block on the
         # real unsaved-changes prompt test_file_menu.py exercises on its own.
+        window.undo_stack.setClean()
+        window.close()
+        qapp.processEvents()
+
+
+def test_removing_media_from_the_bin(qapp, make_video_clip, monkeypatch) -> None:
+    used = make_video_clip("mw_used.mp4", duration=2.0, fps=30, size="320x240")
+    unused = make_video_clip("mw_unused.mp4", duration=2.0, fps=30, size="320x240")
+    window = MainWindow(vo="null")
+    try:
+        window.media_bin.import_files([used, unused])
+        assert pump_until(qapp, lambda: len(window.media_bin.entries) == 2)
+        by_name = {e.media_ref.path.name: e for e in window.media_bin.entries}
+        used_entry, unused_entry = by_name["mw_used.mp4"], by_name["mw_unused.mp4"]
+        window._on_media_double_clicked(used_entry)
+        asked: list[int] = []
+
+        def answer(result: bool):
+            def confirm(_name: str, count: int) -> bool:
+                asked.append(count)
+                return result
+
+            return confirm
+
+        # Not on the timeline: removed silently, nothing to undo.
+        monkeypatch.setattr(window, "_confirm_remove_used_media", answer(True))
+        window._on_media_remove_requested(unused_entry)
+        assert asked == []
+        assert window.media_bin.get(unused_entry.media_ref.id) is None
+        assert window.undo_stack.count() == 1  # just the insert
+
+        # On the timeline, and the user cancels: nothing changes.
+        monkeypatch.setattr(window, "_confirm_remove_used_media", answer(False))
+        window._on_media_remove_requested(used_entry)
+        assert asked == [1]
+        assert window.media_bin.get(used_entry.media_ref.id) is not None
+        assert len(window.project.tracks[0].items) == 1
+
+        # Confirmed: media and its clip go, as one undoable edit...
+        monkeypatch.setattr(window, "_confirm_remove_used_media", answer(True))
+        window._on_media_remove_requested(used_entry)
+        assert window.media_bin.get(used_entry.media_ref.id) is None
+        assert window.project.tracks[0].items == []
+        assert window._undo_action.text() == "Undo Remove media"
+
+        # ...and undoing it brings the media back to the bin with the clip.
+        window._undo_action.trigger()
+        assert len(window.project.tracks[0].items) == 1
+        assert pump_until(qapp, lambda: window.media_bin.get(used_entry.media_ref.id) is not None)
+    finally:
         window.undo_stack.setClean()
         window.close()
         qapp.processEvents()
