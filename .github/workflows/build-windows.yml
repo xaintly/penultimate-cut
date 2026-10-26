@@ -1,6 +1,6 @@
 name: Build Windows installer
 
-# Manual, or on a version tag (git tag v0.2.1 && git push --tags) for an
+# Manual, or on a version tag (git tag v0.2.2 && git push --tags) for an
 # actual release. Not on every push to main: a PyInstaller + Inno Setup
 # build is slow and this repo's fast Linux `pytest` run (a separate concern
 # from this workflow) is the day-to-day correctness check.

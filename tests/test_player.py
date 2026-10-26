@@ -3,6 +3,7 @@ from fractions import Fraction
 
 import pytest
 
+import penultimate_cut.preview.player as player_module
 from penultimate_cut.model.project import Clip, MediaRef, Project, Track
 from penultimate_cut.preview.edl import to_edl
 from penultimate_cut.preview.player import Player
@@ -21,6 +22,45 @@ def make_project(source, duration: float = 3.0) -> Project:
     )
     clip = Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(str(duration)))
     return Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip])])
+
+
+class _FakeMPV:
+    """Stands in for `mpv.MPV` so these two tests can check what `Player`
+    passes it without touching real libmpv (and so they don't need a
+    display/QApplication at all)."""
+
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+
+    def terminate(self) -> None:
+        pass
+
+
+def test_windows_embedding_pins_vo_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """vo=gpu-next (libmpv's current default) is known to render a fully
+    black window when embedded via `wid=` on Windows -- see player.py's own
+    comment. Windows-only, since this environment's real-GL test relies on
+    the default and vo=gpu doesn't even initialize against its software
+    renderer."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(player_module.sys, "platform", "win32")
+    monkeypatch.setattr(player_module.mpv, "MPV", lambda **kw: captured.update(kw) or _FakeMPV())
+
+    Player(wid=12345).close()
+
+    assert captured["wid"] == 12345
+    assert captured["vo"] == "gpu"
+
+
+def test_non_windows_embedding_leaves_default_vo(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(player_module.sys, "platform", "linux")
+    monkeypatch.setattr(player_module.mpv, "MPV", lambda **kw: captured.update(kw) or _FakeMPV())
+
+    Player(wid=12345).close()
+
+    assert captured["wid"] == 12345
+    assert "vo" not in captured
 
 
 def test_load_edl_and_report_duration(make_video_clip) -> None:

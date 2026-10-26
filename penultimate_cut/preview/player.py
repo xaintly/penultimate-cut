@@ -20,6 +20,7 @@ setting `speed` alone gives the scaletempo2 behavior CLAUDE.md asks for.
 from __future__ import annotations
 
 import contextlib
+import sys
 from collections.abc import Callable
 from fractions import Fraction
 from pathlib import Path
@@ -48,6 +49,22 @@ class Player:
         mpv_kwargs: dict[str, object] = {"load_unsafe_playlists": load_unsafe_playlists}
         if wid is not None:
             mpv_kwargs["wid"] = wid
+            if sys.platform == "win32":
+                # Recent mpv/libmpv builds default to vo=gpu-next
+                # (libplacebo). It's known to produce a fully black window
+                # when embedded via `wid=` on Windows -- its d3d11
+                # output-format negotiation (`d3d11-output-format=auto`)
+                # can pick a format the swapchain won't actually display,
+                # while playback otherwise proceeds normally underneath
+                # (duration/position tracking, pause state, all unaffected,
+                # since none of that depends on a frame ever being drawn).
+                # vo=gpu is the older, far-more-tested renderer for `wid=`
+                # embedding specifically. Windows-only: this environment's
+                # own real-GL test (test_preview_widget.py, software Mesa)
+                # relies on the default and vo=gpu doesn't even initialize
+                # against llvmpipe here -- an unrelated Linux/X11-vs-Windows
+                # GPU-backend difference, not evidence against this fix.
+                mpv_kwargs["vo"] = "gpu"
         else:
             mpv_kwargs["vo"] = "null"
             mpv_kwargs["ao"] = "null"
