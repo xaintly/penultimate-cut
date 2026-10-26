@@ -207,6 +207,12 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
+        export_action = file_menu.addAction("Export Video…")
+        export_action.setShortcut(QKeySequence("Ctrl+E"))
+        export_action.triggered.connect(self._open_export_dialog)
+
+        file_menu.addSeparator()
+
         exit_action = file_menu.addAction("Exit")
         exit_action.setShortcut(QKeySequence("Ctrl+Q"))
         exit_action.triggered.connect(self.close)

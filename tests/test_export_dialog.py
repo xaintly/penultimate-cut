@@ -155,3 +155,21 @@ def test_disables_controls_while_exporting(qapp, make_video_clip, tmp_path) -> N
     finally:
         dialog._on_cancel_clicked()
         assert pump_until(qapp, lambda: not dialog._exporting)
+
+
+def test_failed_export_stays_visible_and_offers_details(
+    qapp, tmp_path, make_video_clip, monkeypatch
+) -> None:
+    source = make_video_clip("ed_fail.mp4", duration=1.0, fps=30, size="320x240")
+    dialog = ExportDialog(make_project(source, duration=1.0))
+    shown: list[str] = []
+    monkeypatch.setattr(dialog, "_show_failure_details", shown.append)
+    # A directory that doesn't exist: ffmpeg fails to open the output.
+    dialog._path_edit.setText(str(tmp_path / "missing_dir" / "out.mp4"))
+
+    dialog._start_export()
+
+    assert pump_until(qapp, lambda: not dialog._exporting)
+    assert dialog._status_label.text() == "Export failed."
+    assert not dialog._status_label.isHidden()
+    assert len(shown) == 1 and "ffmpeg exited" in shown[0]

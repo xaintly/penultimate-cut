@@ -181,7 +181,7 @@ def test_gap_produces_lavfi_color_and_anullsrc_with_exact_duration(tmp_path: Pat
     [
         ("black_bars", "pad=640:480"),
         ("crop_to_fill", "crop=640:480"),
-        ("blurred_background", "boxblur=20:2"),
+        ("blurred_background", "boxblur=lr=20:lp=2:cr=20:cp=2"),
     ],
 )
 def test_fit_mode_produces_expected_filter_shape(
@@ -289,3 +289,48 @@ def test_export_mismatched_aspect_ratio_conforms_to_target_resolution(
     info = probe(output_path)
 
     assert (info.width, info.height) == (240, 320)
+
+
+@pytest.mark.parametrize("fit_mode", ["black_bars", "crop_to_fill", "blurred_background"])
+def test_export_joins_non_square_pixel_clip_with_gap_and_square_clip(
+    tmp_path: Path, make_video_clip, fit_mode: str
+) -> None:
+    """Regression: concat needs identical SAR on every segment, so a clip
+    with non-square pixels (old camcorder footage; some phones write odd
+    ratios like 832:832) next to a gap or a normal clip failed to export.
+    Also at a small size, where blurred background's blur radius used to be
+    too big for boxblur."""
+    anamorphic = tmp_path / "anamorphic.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc2=duration=1:size=320x240:rate=30",
+            "-f", "lavfi", "-i", "sine=duration=1",
+            "-vf", "setsar=4/3", "-c:v", "libx264", "-c:a", "aac", "-shortest",
+            str(anamorphic),
+        ],
+        check=True,
+    )  # fmt: skip
+    square = make_video_clip("filt_square_sar.mp4", duration=1.0, fps=30, size="320x240")
+    items = [
+        Clip(
+            media_ref=make_media(path),
+            source_in=Fraction(0),
+            source_out=Fraction(1),
+            fit_mode=fit_mode,
+        )
+        for path in (anamorphic, square)
+    ]
+    project = Project(
+        frame_rate=Fraction(30),
+        tracks=[Track(kind="video", items=[items[0], Gap(duration=Fraction(1)), items[1]])],
+    )
+
+    output_path = render(tmp_path, build_filtergraph(project))
+    sar = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries",
+         "stream=sample_aspect_ratio", "-of", "csv=p=0", str(output_path)],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()  # fmt: skip
+    assert sar == "1:1"
+    assert abs(probe(output_path).duration - 3) < Fraction(1, 10)

@@ -124,13 +124,13 @@ def _clip_filters(
         inputs.append(["-loop", "1", "-i", str(clip.media_ref.path)])
         pre = (
             f"[{input_index}:v]fps={rate},trim=start=0:end={duration_s},"
-            f"setpts=PTS-STARTPTS[v{index}pre]"
+            f"setpts=PTS-STARTPTS,{_SQUARE_PIXELS}[v{index}pre]"
         )
     else:
         inputs.append(["-i", str(clip.media_ref.path)])
         pre = (
             f"[{input_index}:v]trim=start={format_seconds(start)}:end={format_seconds(end)},"
-            f"setpts=PTS-STARTPTS,fps={rate}[v{index}pre]"
+            f"setpts=PTS-STARTPTS,fps={rate},{_SQUARE_PIXELS}[v{index}pre]"
         )
     fit = _fit_stage(clip.fit_mode, width, height, f"v{index}pre", f"v{index}")
     video_filter = f"{pre};{fit}"
@@ -156,9 +156,19 @@ def _gap_filters(
     duration_s = format_seconds(gap.duration)
     video_input = ["-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:r={rate}:d={duration_s}"]
     audio_input = ["-f", "lavfi", "-i", f"anullsrc=r={_GAP_AUDIO_RATE}:cl=stereo:d={duration_s}"]
-    video_filter = f"[{input_index}:v]format=yuv420p[v{index}]"
+    video_filter = f"[{input_index}:v]{_SEGMENT_FORMAT}[v{index}]"
     audio_filter = f"[{input_index + 1}:a]{_aformat()}[a{index}]"
     return [video_input, audio_input], video_filter, audio_filter
+
+
+# concat requires every segment's SAR to match *exactly* -- it compares the
+# raw ratio, so even an unreduced 832:832 (from some phone videos) fails
+# against a gap's 1:1. Sources with non-square pixels (old camcorder/DV
+# footage) are first stretched to their real display shape, so the fit
+# stage's aspect math works on what the viewer actually sees; every segment
+# then ends stamped 1:1.
+_SQUARE_PIXELS = "scale=trunc(iw*sar/2)*2:ih,setsar=1"
+_SEGMENT_FORMAT = "format=yuv420p,setsar=1"
 
 
 def _aformat() -> str:
@@ -169,12 +179,12 @@ def _fit_stage(fit_mode: FitMode, width: int, height: int, in_label: str, out_la
     if fit_mode == "black_bars":
         return (
             f"[{in_label}]scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p[{out_label}]"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,{_SEGMENT_FORMAT}[{out_label}]"
         )
     if fit_mode == "crop_to_fill":
         return (
             f"[{in_label}]scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},format=yuv420p[{out_label}]"
+            f"crop={width}:{height},{_SEGMENT_FORMAT}[{out_label}]"
         )
     if fit_mode == "blurred_background":
         bg, fg, bgblur, fgfit = (
@@ -184,13 +194,18 @@ def _fit_stage(fit_mode: FitMode, width: int, height: int, in_label: str, out_la
             f"{in_label}fgfit",
         )
         blur_w, blur_h = max(2, width // 4), max(2, height // 4)
+        # boxblur rejects a radius that's half the (chroma) plane or more,
+        # which a fixed 20 hits at small export sizes (e.g. 320x240).
+        luma_radius = max(1, min(20, min(blur_w, blur_h) // 2 - 1))
+        chroma_radius = max(1, min(luma_radius, min(blur_w, blur_h) // 4 - 1))
         return (
             f"[{in_label}]split=2[{bg}][{fg}];"
             f"[{bg}]scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},scale={blur_w}:{blur_h},boxblur=20:2,scale={width}:{height},"
+            f"crop={width}:{height},scale={blur_w}:{blur_h},"
+            f"boxblur=lr={luma_radius}:lp=2:cr={chroma_radius}:cp=2,scale={width}:{height},"
             f"eq=brightness=-0.05[{bgblur}];"
             f"[{fg}]scale={width}:{height}:force_original_aspect_ratio=decrease[{fgfit}];"
-            f"[{bgblur}][{fgfit}]overlay=(W-w)/2:(H-h)/2,format=yuv420p[{out_label}]"
+            f"[{bgblur}][{fgfit}]overlay=(W-w)/2:(H-h)/2,{_SEGMENT_FORMAT}[{out_label}]"
         )
     raise FiltergraphError(f"unknown fit mode: {fit_mode}")
 

@@ -92,9 +92,18 @@ def run_export(
                 cancelled = True
                 process.terminate()
                 break
-            if on_progress is not None and "out_time_us" in block:
+            if on_progress is not None:
                 progress = _parse_progress(block, total_duration)
-                on_progress(progress)
+                if progress is not None:
+                    on_progress(progress)
+    except BaseException:
+        # Nobody is reading ffmpeg's stdout any more, so it could block
+        # forever on a full pipe -- stop it rather than wait on it.
+        process.kill()
+        process.wait()
+        stderr_thread.join()
+        output_path.unlink(missing_ok=True)
+        raise
     finally:
         process.wait()
         stderr_thread.join()
@@ -128,8 +137,14 @@ def _progress_blocks(stream: IO[str]) -> Iterator[dict[str, str]]:
             block = {}
 
 
-def _parse_progress(block: dict[str, str], total_duration: Fraction) -> ExportProgress:
-    out_time = Fraction(int(block["out_time_us"]), 1_000_000)
+def _parse_progress(block: dict[str, str], total_duration: Fraction) -> ExportProgress | None:
+    """None for a block with no usable time -- ffmpeg sometimes reports
+    `out_time_us=N/A` mid-export (seen with several clips and gaps, while it
+    flushes one stream), and such a block simply carries no progress."""
+    try:
+        out_time = Fraction(int(block["out_time_us"]), 1_000_000)
+    except (KeyError, ValueError):
+        return None
     fraction = float(out_time / total_duration) if total_duration > 0 else 0.0
     fraction = max(0.0, min(1.0, fraction))
     speed_str = block.get("speed", "0x").rstrip("x").strip()

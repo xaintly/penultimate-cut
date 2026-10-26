@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QVBoxLayout,
@@ -223,6 +224,8 @@ class ExportDialog(QDialog):
             self._signals.cancelled.emit()
         except RunnerError as exc:
             self._signals.failed.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 -- an uncaught error here would leave the dialog stuck "exporting"
+            self._signals.failed.emit(f"Unexpected error: {exc}")
 
     def _on_cancel_clicked(self) -> None:
         if self._exporting:
@@ -251,10 +254,25 @@ class ExportDialog(QDialog):
     def _on_cancelled(self) -> None:
         self._set_exporting(False)
         self._status_label.setText("Export cancelled.")
+        self._status_label.show()
 
     def _on_failed(self, message: str) -> None:
         self._set_exporting(False)
-        self._status_label.setText(f"Export failed: {message}")
+        self._status_label.setText("Export failed.")
+        self._status_label.show()
+        self._show_failure_details(message)
+
+    def _show_failure_details(self, message: str) -> None:
+        """A short plain-language message, with ffmpeg's own output behind
+        "Show Details..." (selectable, so it can be copied into a bug report)
+        rather than dumped into the dialog."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Export failed")
+        box.setText("The video couldn't be exported.")
+        box.setInformativeText("No file was saved. Click Show Details for the technical reason.")
+        box.setDetailedText(message)
+        box.exec()
 
     def _set_exporting(self, exporting: bool) -> None:
         self._exporting = exporting

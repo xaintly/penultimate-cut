@@ -5,7 +5,13 @@ import pytest
 
 from penultimate_cut.export.encoders import encoder_args
 from penultimate_cut.export.filtergraph import build_filtergraph
-from penultimate_cut.export.runner import ExportCancelled, ExportProgress, RunnerError, run_export
+from penultimate_cut.export.runner import (
+    ExportCancelled,
+    ExportProgress,
+    RunnerError,
+    _parse_progress,
+    run_export,
+)
 from penultimate_cut.media.probe import probe
 from penultimate_cut.model.project import Clip, MediaRef, Project, Track
 
@@ -117,3 +123,29 @@ def test_full_pipeline_project_to_encoded_file(tmp_path: Path, make_video_clip) 
     assert info.has_video and info.has_audio
     assert (info.width, info.height) == (320, 240)
     assert abs(info.duration - Fraction(2)) < Fraction(1, 5)
+
+
+def test_progress_block_without_a_time_is_skipped() -> None:
+    # Real ffmpeg output: with several clips and gaps it reports N/A
+    # mid-export, which used to crash the export thread.
+    block = {"out_time_us": "N/A", "speed": "N/A", "progress": "continue"}
+    assert _parse_progress(block, Fraction(10)) is None
+    assert _parse_progress({"progress": "continue"}, Fraction(10)) is None
+    parsed = _parse_progress({"out_time_us": "2500000", "speed": "2.0x"}, Fraction(10))
+    assert parsed == ExportProgress(fraction=0.25, out_time=Fraction(5, 2), speed=2.0)
+
+
+def test_unexpected_error_stops_ffmpeg_and_deletes_partial_file(tmp_path: Path) -> None:
+    output = tmp_path / "out.mp4"
+
+    def explode(_progress: ExportProgress) -> None:
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        run_export(
+            [*lavfi_args(30.0), *encoder_args("libx264", "balanced", 320, 240, Fraction(30))],
+            output,
+            Fraction(30),
+            on_progress=explode,
+        )
+    assert not output.exists()
