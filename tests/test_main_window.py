@@ -136,6 +136,19 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         assert window.project.tracks[0].items[0].duration == Fraction(2)
         assert window.undo_stack.count() == 5
 
+        # Edit > Delete Clip acts on the clip under the playhead; greyed out
+        # when the playhead isn't over one (checked as the menu opens).
+        window.timeline.set_playhead(Fraction(2))  # the end: no clip there
+        window._update_edit_actions()
+        assert not window._delete_clip_action.isEnabled()
+        window.timeline.set_playhead(Fraction(1))
+        window._update_edit_actions()
+        assert window._delete_clip_action.isEnabled()
+        window._delete_clip_action.trigger()
+        assert window.project.tracks[0].items == []
+        window.undo_stack.undo()
+        assert len(window.project.tracks[0].items) == 1
+
         # Dragging a media bin entry onto the timeline: same as
         # double-click, but landing at a specific index instead of always
         # the end.

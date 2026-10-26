@@ -196,7 +196,9 @@ On the timeline, **right-click and drag** scrolls (the content follows the mouse
 a right-click without dragging opens the menu. Left-drag stays reserved for moving
 and trimming clips. In the media bin, Delete or right-click → **Remove from project**
 removes media: silently if no clip uses it, otherwise after a confirmation (its clips
-may be off-screen), as one undoable edit.
+may be off-screen), as one undoable edit. Right-click a clip → **Delete clip**, or
+**Edit → Delete Clip** for the clip under the playhead (greyed out when there's none);
+both leave empty space, like Delete.
 
 ---
 

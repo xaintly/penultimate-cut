@@ -688,3 +688,54 @@ def test_right_drag_scrolls_and_right_click_opens_menu(qapp, make_video_clip, mo
         assert stack.count() == 0  # right-dragging a clip never moves it
     finally:
         widget.shutdown()
+
+
+def test_right_click_on_a_clip_offers_delete_clip(qapp, make_video_clip) -> None:
+    source = make_video_clip("tlw_menu_delete.mp4", duration=10.0, fps=30, size="320x240")
+    media = make_media(source)
+    clip_a = Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(3))
+    clip_b = Clip(media_ref=media, source_in=Fraction(3), source_out=Fraction(6))
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip_a, clip_b])])
+    stack = QUndoStack()
+
+    widget = TimelineWidget()
+    try:
+        widget.set_project(project, stack)
+        x_in_clip_b = float(widget._canvas._view.x_for_time(Fraction(4)))
+        menu = widget._canvas._build_context_menu(x_in_clip_b)
+        assert menu is not None
+        labels = [action.text() for action in menu.actions() if action.text()]
+        assert labels == ["Delete clip", "Delete all empty space"]
+
+        next(a for a in menu.actions() if a.text() == "Delete clip").trigger()
+
+        items = project.tracks[0].items
+        assert items[0] is clip_a and len(items) == 1  # a trailing gap is dropped
+        stack.undo()
+        assert project.tracks[0].items == [clip_a, clip_b]
+    finally:
+        widget.shutdown()
+
+
+def test_delete_clip_at_playhead(qapp, make_video_clip) -> None:
+    source = make_video_clip("tlw_playhead_delete.mp4", duration=10.0, fps=30, size="320x240")
+    media = make_media(source)
+    clip_a = Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(3))
+    clip_b = Clip(media_ref=media, source_in=Fraction(3), source_out=Fraction(6))
+    items = [clip_a, Gap(duration=Fraction(2)), clip_b]
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=items)])
+    stack = QUndoStack()
+
+    widget = TimelineWidget()
+    try:
+        widget.set_project(project, stack)
+        for position, expected in [(0, 0), (Fraction(4), None), (Fraction(6), 2), (9, None)]:
+            widget.set_playhead(Fraction(position))
+            assert widget.clip_index_at_playhead() == expected, position
+
+        widget.set_playhead(Fraction(1))
+        widget.delete_clip_at_playhead()
+        assert isinstance(project.tracks[0].items[0], Gap)  # left as empty space
+        assert project.tracks[0].items[-1] is clip_b
+    finally:
+        widget.shutdown()

@@ -228,6 +228,13 @@ class MainWindow(QMainWindow):
         self._redo_action = edit_menu.addAction("Redo")
         self._redo_action.setShortcut(QKeySequence("Ctrl+Y"))
         self._redo_action.triggered.connect(lambda: self.undo_stack.redo())
+        edit_menu.addSeparator()
+        # No Delete shortcut on this action: the Delete key is a shortcut of
+        # its own that acts on the media bin *or* the timeline (see
+        # _on_delete_key). Enabled state is refreshed whenever the menu opens.
+        self._delete_clip_action = edit_menu.addAction("Delete Clip")
+        self._delete_clip_action.triggered.connect(self.timeline.delete_clip_at_playhead)
+        edit_menu.aboutToShow.connect(self._update_edit_actions)
 
     def _init_shortcuts(self) -> None:
         shortcuts = [
@@ -447,6 +454,7 @@ class MainWindow(QMainWindow):
         ):
             action.setEnabled(available)
             action.setText(f"{verb} {text}" if available and text else verb)
+        self._delete_clip_action.setEnabled(self.timeline.clip_index_at_playhead() is not None)
 
     # --- other wiring --------------------------------------------------------------
 

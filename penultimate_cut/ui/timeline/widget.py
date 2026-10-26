@@ -636,26 +636,55 @@ class _TimelineCanvas(QWidget):
     # tell a click from a drag.
 
     def _show_context_menu(self, x: float, global_pos: QPoint) -> None:
+        menu = self._build_context_menu(x)
+        if menu is not None:
+            menu.exec(global_pos)
+
+    def _build_context_menu(self, x: float) -> QMenu | None:
         track = self.track
         if track is None:
-            return
+            return None
         hit = hit_test(track, self._view, x)
-        gap_index = (
-            hit.index if hit is not None and isinstance(track.items[hit.index], Gap) else None
-        )
+        hit_item = track.items[hit.index] if hit is not None else None
 
         # Parented to the top-level window, not this widget: the embedded
         # video preview makes most of the main window's widgets native, and
         # Qt warns "... must be a top level window" when a popup's parent is
         # one of those (see ui/preview_widget.py).
         menu = QMenu(self.window())
-        if gap_index is not None:
+        if hit is not None and isinstance(hit_item, Clip):
+            index = hit.index
+            menu.addAction("Delete clip").triggered.connect(lambda: self.delete_clip(index))
+            menu.addSeparator()
+        if hit is not None and isinstance(hit_item, Gap):
+            index = hit.index
             delete_gap = menu.addAction("Delete empty space")
-            delete_gap.triggered.connect(lambda: self.delete_gap(gap_index))
+            delete_gap.triggered.connect(lambda: self.delete_gap(index))
         delete_all = menu.addAction("Delete all empty space")
         delete_all.setEnabled(any(isinstance(item, Gap) for item in track.items))
         delete_all.triggered.connect(self.delete_all_gaps)
-        menu.exec(global_pos)
+        return menu
+
+    def delete_clip(self, index: int) -> None:
+        """Delete the clip at `index`, leaving empty space (like the Delete key)."""
+        if self._project is None or self._undo_stack is None:
+            return
+        self._undo_stack.push(DeleteCommand(self._project, self._track_index, index, ripple=False))
+        self._select(None)
+
+    def clip_index_at_playhead(self) -> int | None:
+        """Index of the clip under the playhead, or None (empty space, or
+        past the end)."""
+        track = self.track
+        if track is None:
+            return None
+        start = Fraction(0)
+        for index, item in enumerate(track.items):
+            end = start + item.duration
+            if start <= self._playhead < end:
+                return index if isinstance(item, Clip) else None
+            start = end
+        return None
 
     def delete_gap(self, index: int) -> None:
         if self._project is None or self._undo_stack is None:
@@ -766,6 +795,14 @@ class TimelineWidget(QWidget):
 
     def delete_selected(self, *, ripple: bool) -> None:
         self._canvas.delete_selected(ripple=ripple)
+
+    def clip_index_at_playhead(self) -> int | None:
+        return self._canvas.clip_index_at_playhead()
+
+    def delete_clip_at_playhead(self) -> None:
+        index = self._canvas.clip_index_at_playhead()
+        if index is not None:
+            self._canvas.delete_clip(index)
 
     def insert_clip(self, item: TrackItem, index: int | None = None) -> None:
         self._canvas.insert_clip(item, index)
