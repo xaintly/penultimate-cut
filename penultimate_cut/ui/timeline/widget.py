@@ -37,6 +37,7 @@ from typing import Literal
 from PySide6.QtCore import QObject, QRect, Qt, Signal
 from PySide6.QtGui import (
     QColor,
+    QContextMenuEvent,
     QDragEnterEvent,
     QDropEvent,
     QMouseEvent,
@@ -46,12 +47,13 @@ from PySide6.QtGui import (
     QResizeEvent,
     QUndoStack,
 )
-from PySide6.QtWidgets import QScrollBar, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QMenu, QScrollBar, QSizePolicy, QVBoxLayout, QWidget
 
 from penultimate_cut.commands.timeline_commands import (
     DeleteCommand,
     InsertCommand,
     MoveCommand,
+    RemoveGapsCommand,
     SplitCommand,
     TrimCommand,
 )
@@ -73,9 +75,14 @@ MIN_PIXELS_PER_SECOND = Fraction(2)
 MAX_PIXELS_PER_SECOND = Fraction(500)
 ZOOM_FACTOR = Fraction(3, 2)
 
-MIN_FRAME_WIDTH_PX = 40
-"""Each filmstrip tile is at least this many pixels wide on screen."""
-MAX_FILMSTRIP_FRAMES = 40
+FILMSTRIP_HEIGHT = int(TRACK_HEIGHT * 0.6)
+"""Filmstrip on top, waveform in the remaining 40% below it."""
+MIN_FRAME_WIDTH_PX = 20
+"""Each filmstrip tile is at least this many pixels wide on screen, even
+for a very tall/narrow (e.g. vertical phone) video."""
+DEFAULT_ASPECT = Fraction(16, 9)
+"""Tile shape for media whose dimensions are unknown."""
+MAX_FILMSTRIP_FRAMES = 80
 """Upper bound on tiles per clip, so a long clip zoomed in far doesn't
 trigger an unreasonable number of ffmpeg frame extractions."""
 WAVEFORM_CACHE_COUNT = 100
@@ -111,11 +118,18 @@ def _thumbnail_key(clip: Clip, frame_count: int) -> ThumbnailKey:
     return (*_clip_key(clip), frame_count)
 
 
-def _filmstrip_frame_count(width_px: float) -> int:
+def _filmstrip_frame_count(width_px: float, aspect: Fraction = DEFAULT_ASPECT) -> int:
     """How many distinct frames to tile across a clip rendered `width_px`
-    wide, so each tile is a real, roughly-recognizable frame instead of one
-    thumbnail stretched across a long clip."""
-    return max(1, min(MAX_FILMSTRIP_FRAMES, int(width_px / MIN_FRAME_WIDTH_PX)))
+    wide: as many as fit at roughly the video's own shape (`aspect` =
+    width/height) at filmstrip height, so tiles are neither squeezed nor
+    stretched -- except past `MAX_FILMSTRIP_FRAMES`, where they stretch."""
+    tile_width = max(MIN_FRAME_WIDTH_PX, float(FILMSTRIP_HEIGHT * aspect))
+    return max(1, min(MAX_FILMSTRIP_FRAMES, round(width_px / tile_width)))
+
+
+def _aspect(clip: Clip) -> Fraction:
+    width, height = clip.media_ref.width, clip.media_ref.height
+    return Fraction(width, height) if width and height else DEFAULT_ASPECT
 
 
 @dataclass
@@ -124,6 +138,12 @@ class _TrimDrag:
     index: int
     edge: Literal["start", "end"]
     original_time: Fraction
+    """The edge's source-media time when the drag began."""
+    press_time: Fraction
+    """Timeline time under the mouse when the drag began -- the drag moves
+    the edge by however far the mouse has moved since, not *to* the mouse:
+    timeline time and source-media time are different clocks (a clip
+    starting 5s into its file sits at 0:00 on the timeline)."""
 
 
 @dataclass
@@ -139,8 +159,8 @@ DragState = _TrimDrag | _ReorderDrag
 
 
 class _AsyncSignals(QObject):
-    thumbnails_ready = Signal(str, int, list)  # clip_id, frame_count, list[Path]
-    waveform_ready = Signal(str, list)  # clip_id, list[Peak]
+    thumbnails_ready = Signal(object, list)  # ThumbnailKey, list[Path]
+    waveform_ready = Signal(object, list)  # WaveformKey, list[Peak]
     job_finished = Signal(object)  # ThumbnailKey -- always emitted once, whatever the outcome
 
 
@@ -177,17 +197,32 @@ class _TimelineCanvas(QWidget):
 
     def shutdown(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
+        # The stack can outlive this widget, and its destructor emits
+        # indexChanged (via clear()) -- into a deleted canvas, if still
+        # connected: a hard crash.
+        if self._undo_stack is not None:
+            self._undo_stack.indexChanged.disconnect(self._on_edited)
+            self._undo_stack = None
 
     # --- project / track access -------------------------------------------------
 
     def set_project(self, project: Project, undo_stack: QUndoStack, track_index: int = 0) -> None:
+        if self._undo_stack is not None:
+            self._undo_stack.indexChanged.disconnect(self._on_edited)
         self._project = project
         self._undo_stack = undo_stack
+        # Every edit (and undo/redo) goes through the stack, so this is the
+        # one place to hear that the track's length may have changed.
+        undo_stack.indexChanged.connect(self._on_edited)
         self._track_index = track_index
         self._selected_index = None
         self._thumbnails.clear()
         self._waveforms.clear()
         self._pending.clear()
+        self.content_changed.emit()
+        self.update()
+
+    def _on_edited(self, _index: int) -> None:
         self.content_changed.emit()
         self.update()
 
@@ -291,7 +326,9 @@ class _TimelineCanvas(QWidget):
     def _preview_track(self, track: Track) -> Track:
         if isinstance(self._drag, _TrimDrag):
             try:
-                return trim_item(track, self._drag.index, self._drag.edge, self._live_trim_time())
+                return trim_item(
+                    track, self._drag.index, self._drag.edge, self._live_trim_time(self._drag)
+                )
             except TimelineOpError:
                 return track
         if (
@@ -312,7 +349,7 @@ class _TimelineCanvas(QWidget):
 
     def _paint_clip(self, painter: QPainter, rect: QRect, clip: Clip, *, selected: bool) -> None:
         painter.fillRect(rect, _CLIP_BG)
-        frame_count = _filmstrip_frame_count(rect.width())
+        frame_count = _filmstrip_frame_count(rect.width(), _aspect(clip))
         self._paint_filmstrip(painter, rect, clip, frame_count)
         self._paint_waveform(painter, rect, clip, frame_count)
         painter.setPen(_SELECTED_BORDER if selected else _CLIP_BORDER)
@@ -335,19 +372,16 @@ class _TimelineCanvas(QWidget):
         self._ensure_assets(clip, frame_count)
         if not cached:
             return
-        strip_height = int(rect.height() * 0.6)
         frame_width = rect.width() / len(cached)
         for slot, pixmap in enumerate(cached):
             if pixmap.isNull():
                 continue
             frame_rect = QRect(
-                int(rect.x() + slot * frame_width), rect.y(), int(frame_width) + 1, strip_height
+                int(rect.x() + slot * frame_width), rect.y(), int(frame_width) + 1, FILMSTRIP_HEIGHT
             )
             painter.drawPixmap(frame_rect, pixmap)
 
-    def _paint_waveform(
-        self, painter: QPainter, rect: QRect, clip: Clip, frame_count: int
-    ) -> None:
+    def _paint_waveform(self, painter: QPainter, rect: QRect, clip: Clip, frame_count: int) -> None:
         if not clip.media_ref.has_audio:
             return
         key = _clip_key(clip)
@@ -404,7 +438,7 @@ class _TimelineCanvas(QWidget):
                     start=clip.source_in,
                     is_still_image=clip.media_ref.is_still_image,
                 )
-                self._signals.thumbnails_ready.emit(clip.id, frame_count, paths)
+                self._signals.thumbnails_ready.emit(_thumbnail_key(clip, frame_count), paths)
             except ThumbnailError:
                 pass
         if clip.media_ref.has_audio:
@@ -412,36 +446,27 @@ class _TimelineCanvas(QWidget):
                 peak_list = peaks(
                     clip.media_ref.path, span, count=WAVEFORM_CACHE_COUNT, start=clip.source_in
                 )
-                self._signals.waveform_ready.emit(clip.id, peak_list)
+                self._signals.waveform_ready.emit(_clip_key(clip), peak_list)
             except WaveformError:
                 pass
         self._signals.job_finished.emit(job_key)
 
-    def _on_thumbnails_ready(self, clip_id: str, frame_count: int, paths: list[Path]) -> None:
-        clip = self._find_clip(clip_id)
-        if clip is None:
-            return
-        self._thumbnails[_thumbnail_key(clip, frame_count)] = [QPixmap(str(p)) for p in paths]
+    # Results are stored under the exact key they were generated for, never
+    # re-derived from whichever clip currently has that id: a split or trim
+    # landing while a job is in flight would otherwise file the old range's
+    # frames under the new range's key. A result for a range no clip has any
+    # more is just never looked up.
+
+    def _on_thumbnails_ready(self, key: ThumbnailKey, paths: list[Path]) -> None:
+        self._thumbnails[key] = [QPixmap(str(p)) for p in paths]
         self.update()
 
-    def _on_waveform_ready(self, clip_id: str, peak_list: list[Peak]) -> None:
-        clip = self._find_clip(clip_id)
-        if clip is None:
-            return
-        self._waveforms[_clip_key(clip)] = peak_list
+    def _on_waveform_ready(self, key: WaveformKey, peak_list: list[Peak]) -> None:
+        self._waveforms[key] = peak_list
         self.update()
 
     def _on_job_finished(self, key: ThumbnailKey) -> None:
         self._pending.discard(key)
-
-    def _find_clip(self, clip_id: str) -> Clip | None:
-        track = self.track
-        if track is None:
-            return None
-        for item in track.items:
-            if isinstance(item, Clip) and item.id == clip_id:
-                return item
-        return None
 
     # --- mouse interaction ---------------------------------------------------------
 
@@ -465,7 +490,13 @@ class _TimelineCanvas(QWidget):
         if hit.target in ("trim_start", "trim_end") and isinstance(item, Clip):
             edge: Literal["start", "end"] = "start" if hit.target == "trim_start" else "end"
             original = item.source_in if edge == "start" else item.source_out
-            self._drag = _TrimDrag(kind="trim", index=hit.index, edge=edge, original_time=original)
+            self._drag = _TrimDrag(
+                kind="trim",
+                index=hit.index,
+                edge=edge,
+                original_time=original,
+                press_time=self._view.time_for_x(x),
+            )
             self._select(hit.index)
             return
 
@@ -508,15 +539,26 @@ class _TimelineCanvas(QWidget):
         self.selection_changed.emit(index)
         self.update()
 
-    def _live_trim_time(self) -> Fraction:
-        candidate = self._view.time_for_x(self._last_mouse_x)
-        fps = self._project.frame_rate if self._project is not None else Fraction(30)
-        return snap_to_frame(candidate, fps)
+    def _live_trim_time(self, drag: _TrimDrag) -> Fraction:
+        """The dragged edge's new source-media time: its original time
+        shifted by the mouse's movement (in whole source frames), clamped
+        to what the source media and the clip's other edge allow."""
+        track = self.track
+        assert track is not None and self._project is not None
+        clip = track.items[drag.index]
+        assert isinstance(clip, Clip)
+        fps = clip.media_ref.frame_rate or self._project.frame_rate
+        moved = self._view.time_for_x(self._last_mouse_x) - drag.press_time
+        candidate = drag.original_time + snap_to_frame(moved * clip.speed, fps)
+        one_frame = 1 / fps
+        if drag.edge == "start":
+            return max(Fraction(0), min(candidate, clip.source_out - one_frame))
+        return max(clip.source_in + one_frame, min(candidate, clip.media_ref.duration))
 
     def _commit_trim(self, drag: _TrimDrag) -> None:
         if self._project is None or self._undo_stack is None:
             return
-        new_time = self._live_trim_time()
+        new_time = self._live_trim_time(drag)
         if new_time == drag.original_time:
             return
         try:
@@ -549,6 +591,38 @@ class _TimelineCanvas(QWidget):
             pass
         self._selected_index = drag.target_index
         self.selection_changed.emit(self._selected_index)
+
+    # --- right-click menu ----------------------------------------------------------
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        track = self.track
+        if track is None:
+            return
+        hit = hit_test(track, self._view, event.pos().x())
+        gap_index = (
+            hit.index if hit is not None and isinstance(track.items[hit.index], Gap) else None
+        )
+
+        menu = QMenu(self)
+        if gap_index is not None:
+            delete_gap = menu.addAction("Delete empty space")
+            delete_gap.triggered.connect(lambda: self.delete_gap(gap_index))
+        delete_all = menu.addAction("Delete all empty space")
+        delete_all.setEnabled(any(isinstance(item, Gap) for item in track.items))
+        delete_all.triggered.connect(self.delete_all_gaps)
+        menu.exec(event.globalPos())
+
+    def delete_gap(self, index: int) -> None:
+        if self._project is None or self._undo_stack is None:
+            return
+        self._undo_stack.push(DeleteCommand(self._project, self._track_index, index, ripple=True))
+        self._select(None)
+
+    def delete_all_gaps(self) -> None:
+        if self._project is None or self._undo_stack is None:
+            return
+        self._undo_stack.push(RemoveGapsCommand(self._project, self._track_index))
+        self._select(None)
 
     # --- drag and drop, media bin -> timeline ---------------------------------------
 
@@ -625,7 +699,13 @@ class TimelineWidget(QWidget):
         self._canvas.set_project(project, undo_stack, track_index)
 
     def set_playhead(self, position: Fraction) -> None:
+        """Move the visual playhead (driven by the preview during playback).
+        If it's left the visible area, page the view so it's at the left
+        edge again -- playback never runs off-screen."""
         self._canvas.set_playhead(position)
+        x = self._canvas._view.x_for_time(position)
+        if x < 0 or x >= self._canvas.width():
+            self._scrollbar.setValue(int(position * self._canvas._view.pixels_per_second))
 
     def split_at_playhead(self) -> None:
         self._canvas.split_at_playhead()

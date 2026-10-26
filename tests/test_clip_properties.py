@@ -83,3 +83,20 @@ def test_set_clip_does_not_emit_fit_mode_changed(qapp) -> None:
     panel.set_clip(clip)
 
     assert received == []
+
+
+def test_long_filename_is_elided_and_does_not_widen_panel(qapp) -> None:
+    panel = ClipPropertiesPanel()
+    panel.show()
+    max_width = panel.maximumWidth()
+    long_name = "a_very_long_recording_name_from_the_group_project_final_v3_really_final.mp4"
+    panel.set_clip(make_clip(long_name))
+    qapp.processEvents()
+
+    assert panel.maximumWidth() == max_width
+    assert panel.minimumSizeHint().width() <= max_width
+    shown = panel._name_label.text()
+    assert shown != long_name
+    assert shown.endswith(".mp4")  # elided in the middle, keeping the extension
+    assert panel._name_label.toolTip() == long_name
+    panel.close()

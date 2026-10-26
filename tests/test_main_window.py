@@ -1,6 +1,7 @@
 import time
 from fractions import Fraction
 
+from penultimate_cut.model.project import Clip, Gap
 from penultimate_cut.ui.main_window import MainWindow
 
 
@@ -107,19 +108,28 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         assert len(window.project.tracks[0].items) == 2
         assert window.undo_stack.count() == 3
 
-        # Delete button, on the selected (first) piece, ripple.
+        # Delete button, on the selected (first) piece: leaves empty space
+        # behind (Movie Maker style), rather than closing the gap.
         window.timeline._canvas._select(0)
         window._delete_button.click()
-        assert len(window.project.tracks[0].items) == 1
+        assert len(window.project.tracks[0].items) == 2
+        assert isinstance(window.project.tracks[0].items[0], Gap)
         assert window.project.tracks[0].items[0].duration == Fraction(2)
         assert window.undo_stack.count() == 4
 
         # Undo/redo via the stack directly (the shortcuts just call these
         # same methods; already checked structurally above).
         window.undo_stack.undo()
-        assert len(window.project.tracks[0].items) == 2
+        assert isinstance(window.project.tracks[0].items[0], Clip)
         window.undo_stack.redo()
+        assert isinstance(window.project.tracks[0].items[0], Gap)
+
+        # Deleting the selected empty space closes it.
+        window.timeline._canvas._select(0)
+        window._delete_button.click()
         assert len(window.project.tracks[0].items) == 1
+        assert window.project.tracks[0].items[0].duration == Fraction(2)
+        assert window.undo_stack.count() == 5
 
         # Dragging a media bin entry onto the timeline: same as
         # double-click, but landing at a specific index instead of always

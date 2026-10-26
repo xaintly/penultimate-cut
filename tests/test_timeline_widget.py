@@ -164,13 +164,14 @@ def test_trim_drag_commits_one_undo_step(qapp, make_video_clip) -> None:
 
         canvas = widget._canvas
         y = TRACK_TOP + 10
-        # 10s clip at 50px/s spans 0..500px; grab the right trim handle near x=498.
+        # 10s clip at 50px/s spans 0..500px; grab the right trim handle near
+        # x=495 and drag it 100px (2s) left.
         QTest.mousePress(
-            canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(498, y)
+            canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(495, y)
         )
-        QTest.mouseMove(canvas, QPoint(400, y))
+        QTest.mouseMove(canvas, QPoint(395, y))
         QTest.mouseRelease(
-            canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(400, y)
+            canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(395, y)
         )
         qapp.processEvents()
 
@@ -179,6 +180,87 @@ def test_trim_drag_commits_one_undo_step(qapp, make_video_clip) -> None:
 
         stack.undo()
         assert project.tracks[0].items[0].source_out == Fraction(10)
+    finally:
+        widget.shutdown()
+
+
+def test_trim_moves_by_mouse_delta_in_source_time(qapp, make_video_clip) -> None:
+    # Regression: a clip starting 5s into its source sits at timeline 0:00.
+    # Clicking its left edge without dragging used to trim its start to
+    # *source* time 0 (the timeline time under the mouse), bringing back
+    # the whole deleted first half.
+    source = make_video_clip("tlw_trim_offset.mp4", duration=10.0, fps=30, size="320x240")
+    clip = Clip(media_ref=make_media(source), source_in=Fraction(5), source_out=Fraction(10))
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip])])
+    stack = QUndoStack()
+
+    widget = TimelineWidget()
+    try:
+        widget.resize(800, 150)
+        widget.set_project(project, stack)
+        widget.show()
+        qapp.processEvents()
+
+        canvas = widget._canvas
+        y = TRACK_TOP + 10
+        left, right = Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
+        QTest.mousePress(canvas, left, right, QPoint(2, y))
+        QTest.mouseRelease(canvas, left, right, QPoint(2, y))
+        qapp.processEvents()
+        assert stack.count() == 0
+        assert project.tracks[0].items[0].source_in == Fraction(5)
+
+        # Dragging the start handle 50px (1s) right trims 1s off the start.
+        QTest.mousePress(canvas, left, right, QPoint(2, y))
+        QTest.mouseMove(canvas, QPoint(52, y))
+        QTest.mouseRelease(canvas, left, right, QPoint(52, y))
+        qapp.processEvents()
+        assert stack.count() == 1
+        assert project.tracks[0].items[0].source_in == Fraction(6)
+    finally:
+        widget.shutdown()
+
+
+def test_delete_all_gaps(qapp, make_video_clip) -> None:
+    source = make_video_clip("tlw_gaps.mp4", duration=10.0, fps=30, size="320x240")
+    media = make_media(source)
+    clip_a = Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(3))
+    clip_b = Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(3))
+    items = [Gap(duration=Fraction(2)), clip_a, Gap(duration=Fraction(1)), clip_b]
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=items)])
+    stack = QUndoStack()
+
+    widget = TimelineWidget()
+    try:
+        widget.set_project(project, stack)
+        widget._canvas.delete_gap(2)
+        assert project.tracks[0].items == [items[0], clip_a, clip_b]
+        widget._canvas.delete_all_gaps()
+        assert project.tracks[0].items == [clip_a, clip_b]
+        assert stack.count() == 2
+    finally:
+        widget.shutdown()
+
+
+def test_playhead_leaving_view_pages_the_timeline(qapp, make_video_clip) -> None:
+    source = make_video_clip("tlw_autoscroll.mp4", duration=30.0, fps=30, size="320x240")
+    project = make_project(source, duration=30.0)
+    stack = QUndoStack()
+
+    widget = TimelineWidget()
+    try:
+        widget.resize(400, 150)
+        widget.set_project(project, stack)
+        widget.show()
+        qapp.processEvents()
+
+        # 400px at 50px/s shows 0..8s.
+        widget.set_playhead(Fraction(5))
+        assert widget._canvas._view.scroll_offset == 0
+        widget.set_playhead(Fraction(9))
+        assert widget._canvas._view.scroll_offset == Fraction(9)
+        widget.set_playhead(Fraction(1))
+        assert widget._canvas._view.scroll_offset == Fraction(1)
     finally:
         widget.shutdown()
 
@@ -389,17 +471,19 @@ def test_async_thumbnail_and_waveform_generation(qapp, make_video_clip) -> None:
         widget.show()
         qapp.processEvents()
 
-        # 3s clip at the default 50px/sec zoom renders 150px wide -- enough
-        # for 3 tiles at the 40px-per-tile minimum.
-        frame_count = _filmstrip_frame_count(150)
-        assert frame_count == 3
+        # 3s clip at the default 50px/sec zoom renders 150px wide; a 4:3
+        # tile at the 48px filmstrip height is 64px, so 2 tiles fit.
+        frame_count = _filmstrip_frame_count(150, Fraction(4, 3))
+        assert frame_count == 2
         thumb_key = _thumbnail_key(clip, frame_count)
         wave_key = _clip_key(clip)
         assert pump_until(qapp, lambda: thumb_key in widget._canvas._thumbnails)
         assert pump_until(qapp, lambda: wave_key in widget._canvas._waveforms)
-        assert len(widget._canvas._thumbnails[thumb_key]) == 3
+        assert len(widget._canvas._thumbnails[thumb_key]) == 2
         assert len(widget._canvas._waveforms[wave_key]) == 100
-        assert thumb_key not in widget._canvas._pending
+        # `job_finished` is its own queued signal, delivered after the
+        # waveform result -- so wait for it rather than checking immediately.
+        assert pump_until(qapp, lambda: thumb_key not in widget._canvas._pending)
     finally:
         widget.shutdown()
 
@@ -528,3 +612,40 @@ def test_drop_event_without_media_mime_type_does_nothing(qapp) -> None:
 def test_shutdown_is_safe_to_call(qapp) -> None:
     widget = TimelineWidget()
     widget.shutdown()  # must not raise or hang
+
+
+def test_scrollbar_range_follows_edits(qapp, make_video_clip) -> None:
+    # Regression: the scroll range was only recalculated on zoom/resize, so
+    # inserting a clip (or deleting part of one) left it stale.
+    source = make_video_clip("tlw_range.mp4", duration=10.0, fps=30, size="320x240")
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[])])
+    stack = QUndoStack()
+
+    widget = TimelineWidget()
+    try:
+        widget.resize(400, 150)
+        widget.set_project(project, stack)
+        widget.show()
+        qapp.processEvents()
+        assert widget._scrollbar.maximum() == 0
+
+        clip = Clip(media_ref=make_media(source), source_in=Fraction(0), source_out=Fraction(10))
+        widget.insert_clip(clip)
+        # 10s at 50px/s = 500px of content in a 400px-wide view.
+        assert widget._scrollbar.maximum() == 500 - widget._canvas.width()
+
+        stack.undo()
+        assert widget._scrollbar.maximum() == 0
+    finally:
+        widget.shutdown()
+
+
+def test_filmstrip_tiles_follow_video_shape() -> None:
+    # 48px-tall tiles: 16:9 -> ~85px each, 4:3 -> 64px, vertical 9:16 ->
+    # 27px; never thinner than the 20px minimum.
+    assert _filmstrip_frame_count(850, Fraction(16, 9)) == 10
+    assert _filmstrip_frame_count(640, Fraction(4, 3)) == 10
+    assert _filmstrip_frame_count(270, Fraction(9, 16)) == 10
+    assert _filmstrip_frame_count(200, Fraction(1, 10)) == 10
+    assert _filmstrip_frame_count(10, Fraction(16, 9)) == 1
+    assert _filmstrip_frame_count(10**6, Fraction(16, 9)) == 80

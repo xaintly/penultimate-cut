@@ -40,6 +40,12 @@ class PreviewWidget(QWidget):
         super().__init__(parent)
 
         self._video_surface = QWidget(self)
+        # Making this native also makes its ancestors (and, in turn, their
+        # siblings -- nearly the whole main window) native. That's behind
+        # Qt's occasional harmless console warning "QWidgetWindow(...
+        # TimelineWidgetClassWindow) must be a top level window". Don't
+        # "fix" it with WA_DontCreateNativeAncestors: tried, and embedded
+        # mpv then intermittently hangs the app at load.
         self._video_surface.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         self._video_surface.setStyleSheet("background-color: black;")
 

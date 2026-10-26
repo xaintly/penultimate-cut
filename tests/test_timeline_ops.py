@@ -10,6 +10,7 @@ from penultimate_cut.model.timeline_ops import (
     insert_item,
     item_at,
     move_item,
+    remove_gaps,
     set_fit_mode,
     split_at,
     trim_item,
@@ -84,6 +85,52 @@ def test_delete_leave_gap_preserves_total_duration() -> None:
     assert isinstance(new_track.items[0], Gap)
     assert new_track.items[0].duration == Fraction(5)
     assert new_track.duration == Fraction(8)
+
+
+def test_delete_leave_gap_merges_with_neighbouring_gaps() -> None:
+    track = Track(
+        kind="video",
+        items=[
+            make_clip(duration=Fraction(1)),
+            Gap(duration=Fraction(2)),
+            make_clip(duration=Fraction(3)),
+            Gap(duration=Fraction(4)),
+            make_clip(duration=Fraction(5)),
+        ],
+    )
+    new_track = delete_item(track, 2, ripple=False)
+    assert len(new_track.items) == 3
+    assert isinstance(new_track.items[1], Gap)
+    assert new_track.items[1].duration == Fraction(9)
+    assert new_track.duration == track.duration
+
+
+def test_delete_leave_gap_at_end_drops_trailing_empty_space() -> None:
+    first = make_clip(duration=Fraction(5))
+    track = Track(kind="video", items=[first, Gap(duration=Fraction(1)), make_clip()])
+    new_track = delete_item(track, 2, ripple=False)
+    assert new_track.items == [first]
+
+
+def test_deleting_a_gap_always_closes_it() -> None:
+    clips = [make_clip(duration=Fraction(5)), make_clip(duration=Fraction(3))]
+    track = Track(kind="video", items=[clips[0], Gap(duration=Fraction(2)), clips[1]])
+    assert delete_item(track, 1, ripple=False).items == clips
+    assert delete_item(track, 1, ripple=True).items == clips
+
+
+def test_remove_gaps_closes_all_empty_space() -> None:
+    clips = [make_clip(duration=Fraction(5)), make_clip(duration=Fraction(3))]
+    track = Track(
+        kind="video",
+        items=[Gap(duration=Fraction(1)), clips[0], Gap(duration=Fraction(2)), clips[1]],
+    )
+    assert remove_gaps(track).items == clips
+
+
+def test_split_halves_get_distinct_ids() -> None:
+    new_track = split_at(Track(kind="video", items=[make_clip()]), Fraction(4))
+    assert new_track.items[0].id != new_track.items[1].id
 
 
 def test_trim_start_shrinks_clip_and_shifts_later_items() -> None:

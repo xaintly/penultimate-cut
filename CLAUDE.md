@@ -171,8 +171,12 @@ vendor/                  # ffmpeg.exe, ffprobe.exe, libmpv-2.dll (gitignored; fe
 |---|---|
 | Space | Play / pause |
 | S | Split at playhead |
-| Delete | Remove selected segment and close the gap (ripple) |
-| Shift+Delete | Remove selected segment and leave a gap |
+| Delete | Remove selected segment and leave empty space (like Movie Maker/Clipchamp) |
+| Shift+Delete | Remove selected segment and close the gap (ripple) |
+
+Empty space on the timeline (a `Gap`) plays as black + silence. Right-click it for
+**Delete empty space**; right-click anywhere on the timeline for **Delete all empty
+space**. Selecting empty space and pressing Delete also closes it.
 | ← / → | Step one frame back / forward |
 | Shift+← / → | Jump 1 second |
 | J / K / L | Reverse / pause / forward; repeat J or L to speed up |

@@ -20,7 +20,7 @@ from typing import Literal
 from PySide6.QtGui import QUndoCommand
 
 from penultimate_cut.model import timeline_ops
-from penultimate_cut.model.project import FitMode, Project, Track, TrackItem
+from penultimate_cut.model.project import FitMode, Gap, Project, Track, TrackItem
 
 
 class _TrackSwapCommand(QUndoCommand):
@@ -49,14 +49,27 @@ class SplitCommand(_TrackSwapCommand):
 
 
 class DeleteCommand(_TrackSwapCommand):
-    """Remove an item, closing the gap (`ripple=True`) or leaving one behind."""
+    """Remove an item, closing the gap (`ripple=True`) or leaving one behind.
+    Deleting a gap itself always closes it -- see `timeline_ops.delete_item`."""
 
     def __init__(
         self, project: Project, track_index: int, item_index: int, *, ripple: bool
     ) -> None:
-        new_track = timeline_ops.delete_item(project.tracks[track_index], item_index, ripple=ripple)
-        text = "Delete" if ripple else "Delete (leave gap)"
+        track = project.tracks[track_index]
+        new_track = timeline_ops.delete_item(track, item_index, ripple=ripple)
+        if isinstance(track.items[item_index], Gap):
+            text = "Delete empty space"
+        else:
+            text = "Delete and close gap" if ripple else "Delete"
         super().__init__(text, project, track_index, new_track)
+
+
+class RemoveGapsCommand(_TrackSwapCommand):
+    """Close up every stretch of empty space in the track."""
+
+    def __init__(self, project: Project, track_index: int) -> None:
+        new_track = timeline_ops.remove_gaps(project.tracks[track_index])
+        super().__init__("Delete all empty space", project, track_index, new_track)
 
 
 class TrimCommand(_TrackSwapCommand):

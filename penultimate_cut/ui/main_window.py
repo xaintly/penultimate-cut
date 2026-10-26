@@ -141,7 +141,7 @@ class MainWindow(QMainWindow):
         self._export_button = QPushButton("Export")
         self._import_button.clicked.connect(self.media_bin.choose_files)
         self._split_button.clicked.connect(self.timeline.split_at_playhead)
-        self._delete_button.clicked.connect(lambda: self.timeline.delete_selected(ripple=True))
+        self._delete_button.clicked.connect(lambda: self.timeline.delete_selected(ripple=False))
         self._export_button.clicked.connect(self._open_export_dialog)
 
         button_row = QHBoxLayout()
@@ -205,8 +205,8 @@ class MainWindow(QMainWindow):
         shortcuts = [
             ("Space", self.preview.toggle_play_pause),
             ("S", self.timeline.split_at_playhead),
-            ("Delete", lambda: self.timeline.delete_selected(ripple=True)),
-            ("Shift+Delete", lambda: self.timeline.delete_selected(ripple=False)),
+            ("Delete", lambda: self.timeline.delete_selected(ripple=False)),
+            ("Shift+Delete", lambda: self.timeline.delete_selected(ripple=True)),
             ("Ctrl+Z", lambda: self.undo_stack.undo()),
             ("Ctrl+Y", lambda: self.undo_stack.redo()),
             ("+", self.timeline.zoom_in),
