@@ -68,6 +68,28 @@ def test_widget_embeds_real_window_and_loads_project(qapp, widget, make_video_cl
     assert widget._time_label.text() != "00:00 / 00:00"
 
 
+def test_load_project_starts_paused_not_autoplaying(qapp, widget, make_video_clip) -> None:
+    """mpv autoplays a freshly loaded file by default; `load_project` must
+    override that so an edit (every one of which reloads the EDL) doesn't
+    silently resume playback, and so the very first press of Play actually
+    starts it instead of pausing an already-playing video the button's own
+    label never reflected."""
+    source = make_video_clip("pw_autoplay.mp4", duration=2.0, fps=30, size="320x240")
+    project = make_project(source, duration=2.0)
+
+    widget.load_project(project)
+    assert widget.player.wait_until_ready(timeout=8)
+    pump(qapp, 0.3)
+    assert widget.player.is_playing is False
+    assert widget._play_button.text() == "Play"
+
+    widget._play_button.click()
+    assert widget.player.is_playing is True
+    position_before = widget.player.position
+    pump(qapp, 0.5)
+    assert widget.player.position > position_before
+
+
 def test_play_pause_updates_button_text(widget, make_video_clip) -> None:
     source = make_video_clip("pw_b.mp4", duration=2.0, fps=30, size="320x240")
     project = make_project(source, duration=2.0)

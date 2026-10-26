@@ -94,6 +94,19 @@ class PreviewWidget(QWidget):
 
     def load_project(self, project: Project) -> None:
         self._player.load_edl(to_edl(project))
+        # mpv starts playing a freshly loaded file immediately (its `pause`
+        # property defaults to False and loading a new file doesn't change
+        # it) -- confirmed this reliably sticks even without waiting for the
+        # load to finish. Without this, every edit (every `load_project`
+        # call, since `MainWindow` reloads on every undo-stack change) would
+        # silently resume playback the user never asked for, while this
+        # widget's own Play/Pause button -- which only updates its label from
+        # explicit play()/pause()/toggle_play_pause() calls, never from mpv's
+        # actual state -- would still say "Play", so the first press of it
+        # would silently *pause* the already-playing video instead of
+        # starting it.
+        self._player.pause()
+        self._play_button.setText("Play")
 
     # --- transport ----------------------------------------------------------------
 

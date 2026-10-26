@@ -13,7 +13,9 @@ from penultimate_cut.ui.timeline.widget import (
     _TRACK_BG,
     TRACK_TOP,
     TimelineWidget,
-    _asset_key,
+    _clip_key,
+    _filmstrip_frame_count,
+    _thumbnail_key,
 )
 
 
@@ -387,12 +389,17 @@ def test_async_thumbnail_and_waveform_generation(qapp, make_video_clip) -> None:
         widget.show()
         qapp.processEvents()
 
-        key = _asset_key(clip)
-        assert pump_until(qapp, lambda: key in widget._canvas._thumbnails)
-        assert pump_until(qapp, lambda: key in widget._canvas._waveforms)
-        assert len(widget._canvas._thumbnails[key]) == 8
-        assert len(widget._canvas._waveforms[key]) == 100
-        assert key not in widget._canvas._pending
+        # 3s clip at the default 50px/sec zoom renders 150px wide -- enough
+        # for 3 tiles at the 40px-per-tile minimum.
+        frame_count = _filmstrip_frame_count(150)
+        assert frame_count == 3
+        thumb_key = _thumbnail_key(clip, frame_count)
+        wave_key = _clip_key(clip)
+        assert pump_until(qapp, lambda: thumb_key in widget._canvas._thumbnails)
+        assert pump_until(qapp, lambda: wave_key in widget._canvas._waveforms)
+        assert len(widget._canvas._thumbnails[thumb_key]) == 3
+        assert len(widget._canvas._waveforms[wave_key]) == 100
+        assert thumb_key not in widget._canvas._pending
     finally:
         widget.shutdown()
 

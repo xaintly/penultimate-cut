@@ -9,10 +9,15 @@ public API down and keeps the scrollbar's range in sync.
 
 Filmstrip thumbnails and waveform peaks are generated on a background
 thread pool -- same reasoning and cross-thread-signal pattern as
-`ui/media_bin.py` -- keyed by `(clip.id, source_in, source_out)` so
-trimming a clip (same id, new range) naturally invalidates the in-memory
-cache instead of needing an explicit invalidation step; the on-disk cache
-in media/thumbnails.py and media/waveform.py is unaffected either way.
+`ui/media_bin.py`. Waveforms are keyed by `(clip.id, source_in, source_out)`
+so trimming a clip (same id, new range) naturally invalidates the
+in-memory cache instead of needing an explicit invalidation step.
+Thumbnails are keyed by that same triple plus how many tiles the clip's
+current on-screen width calls for, so a long clip gets a real filmstrip
+(several distinct frames tiled across its width) instead of one frame
+stretched over the whole thing, and zooming in asks for more tiles instead
+of stretching the same handful further. The on-disk cache in
+media/thumbnails.py and media/waveform.py is unaffected either way.
 
 Live edits during a drag (trimming, reordering) are previewed by computing
 a scratch `Track` with the real `timeline_ops` function and painting that
@@ -68,8 +73,11 @@ MIN_PIXELS_PER_SECOND = Fraction(2)
 MAX_PIXELS_PER_SECOND = Fraction(500)
 ZOOM_FACTOR = Fraction(3, 2)
 
-FILMSTRIP_CACHE_COUNT = 8
 MIN_FRAME_WIDTH_PX = 40
+"""Each filmstrip tile is at least this many pixels wide on screen."""
+MAX_FILMSTRIP_FRAMES = 40
+"""Upper bound on tiles per clip, so a long clip zoomed in far doesn't
+trigger an unreasonable number of ffmpeg frame extractions."""
 WAVEFORM_CACHE_COUNT = 100
 
 DRAG_THRESHOLD_PX = 4.0
@@ -91,11 +99,23 @@ _PLAYHEAD_COLOR = QColor(230, 40, 40)
 _LABEL_COLOR = QColor(235, 235, 235)
 
 
-AssetKey = tuple[str, Fraction, Fraction]
+WaveformKey = tuple[str, Fraction, Fraction]
+ThumbnailKey = tuple[str, Fraction, Fraction, int]  # + frame_count
 
 
-def _asset_key(clip: Clip) -> AssetKey:
+def _clip_key(clip: Clip) -> WaveformKey:
     return (clip.id, clip.source_in, clip.source_out)
+
+
+def _thumbnail_key(clip: Clip, frame_count: int) -> ThumbnailKey:
+    return (*_clip_key(clip), frame_count)
+
+
+def _filmstrip_frame_count(width_px: float) -> int:
+    """How many distinct frames to tile across a clip rendered `width_px`
+    wide, so each tile is a real, roughly-recognizable frame instead of one
+    thumbnail stretched across a long clip."""
+    return max(1, min(MAX_FILMSTRIP_FRAMES, int(width_px / MIN_FRAME_WIDTH_PX)))
 
 
 @dataclass
@@ -119,9 +139,9 @@ DragState = _TrimDrag | _ReorderDrag
 
 
 class _AsyncSignals(QObject):
-    thumbnails_ready = Signal(str, list)  # clip_id, list[Path]
+    thumbnails_ready = Signal(str, int, list)  # clip_id, frame_count, list[Path]
     waveform_ready = Signal(str, list)  # clip_id, list[Peak]
-    job_finished = Signal(object)  # AssetKey -- always emitted once, whatever the outcome
+    job_finished = Signal(object)  # ThumbnailKey -- always emitted once, whatever the outcome
 
 
 class _TimelineCanvas(QWidget):
@@ -147,9 +167,9 @@ class _TimelineCanvas(QWidget):
         self._last_mouse_x = 0.0
 
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="timeline-assets")
-        self._pending: set[AssetKey] = set()
-        self._thumbnails: dict[AssetKey, list[QPixmap]] = {}
-        self._waveforms: dict[AssetKey, list[Peak]] = {}
+        self._pending: set[ThumbnailKey] = set()
+        self._thumbnails: dict[ThumbnailKey, list[QPixmap]] = {}
+        self._waveforms: dict[WaveformKey, list[Peak]] = {}
         self._signals = _AsyncSignals()
         self._signals.thumbnails_ready.connect(self._on_thumbnails_ready)
         self._signals.waveform_ready.connect(self._on_waveform_ready)
@@ -292,8 +312,9 @@ class _TimelineCanvas(QWidget):
 
     def _paint_clip(self, painter: QPainter, rect: QRect, clip: Clip, *, selected: bool) -> None:
         painter.fillRect(rect, _CLIP_BG)
-        self._paint_filmstrip(painter, rect, clip)
-        self._paint_waveform(painter, rect, clip)
+        frame_count = _filmstrip_frame_count(rect.width())
+        self._paint_filmstrip(painter, rect, clip, frame_count)
+        self._paint_waveform(painter, rect, clip, frame_count)
         painter.setPen(_SELECTED_BORDER if selected else _CLIP_BORDER)
         painter.drawRect(rect.adjusted(0, 0, -1, -1))
         painter.setPen(_LABEL_COLOR)
@@ -304,20 +325,19 @@ class _TimelineCanvas(QWidget):
             clip.media_ref.path.name,
         )
 
-    def _paint_filmstrip(self, painter: QPainter, rect: QRect, clip: Clip) -> None:
+    def _paint_filmstrip(
+        self, painter: QPainter, rect: QRect, clip: Clip, frame_count: int
+    ) -> None:
         if not clip.media_ref.has_video:
             return
-        key = _asset_key(clip)
+        key = _thumbnail_key(clip, frame_count)
         cached = self._thumbnails.get(key)
-        self._ensure_assets(clip)
+        self._ensure_assets(clip, frame_count)
         if not cached:
             return
         strip_height = int(rect.height() * 0.6)
-        count = max(1, min(len(cached), int(rect.width() / MIN_FRAME_WIDTH_PX)))
-        frame_width = rect.width() / count
-        for slot in range(count):
-            source_index = round(slot * (len(cached) - 1) / max(1, count - 1))
-            pixmap = cached[source_index]
+        frame_width = rect.width() / len(cached)
+        for slot, pixmap in enumerate(cached):
             if pixmap.isNull():
                 continue
             frame_rect = QRect(
@@ -325,12 +345,14 @@ class _TimelineCanvas(QWidget):
             )
             painter.drawPixmap(frame_rect, pixmap)
 
-    def _paint_waveform(self, painter: QPainter, rect: QRect, clip: Clip) -> None:
+    def _paint_waveform(
+        self, painter: QPainter, rect: QRect, clip: Clip, frame_count: int
+    ) -> None:
         if not clip.media_ref.has_audio:
             return
-        key = _asset_key(clip)
+        key = _clip_key(clip)
         cached = self._waveforms.get(key)
-        self._ensure_assets(clip)
+        self._ensure_assets(clip, frame_count)
         if not cached:
             return
         wave_top = rect.y() + int(rect.height() * 0.6)
@@ -355,18 +377,18 @@ class _TimelineCanvas(QWidget):
 
     # --- async thumbnail / waveform generation -------------------------------------
 
-    def _ensure_assets(self, clip: Clip) -> None:
-        key = _asset_key(clip)
-        if key in self._pending:
+    def _ensure_assets(self, clip: Clip, frame_count: int) -> None:
+        job_key = _thumbnail_key(clip, frame_count if clip.media_ref.has_video else 0)
+        if job_key in self._pending:
             return
-        needs_thumbnail = clip.media_ref.has_video and key not in self._thumbnails
-        needs_waveform = clip.media_ref.has_audio and key not in self._waveforms
+        needs_thumbnail = clip.media_ref.has_video and job_key not in self._thumbnails
+        needs_waveform = clip.media_ref.has_audio and _clip_key(clip) not in self._waveforms
         if not needs_thumbnail and not needs_waveform:
             return
-        self._pending.add(key)
-        self._executor.submit(self._generate_assets, clip)
+        self._pending.add(job_key)
+        self._executor.submit(self._generate_assets, clip, frame_count, job_key)
 
-    def _generate_assets(self, clip: Clip) -> None:
+    def _generate_assets(self, clip: Clip, frame_count: int, job_key: ThumbnailKey) -> None:
         # Runs on a worker thread. One `job_finished` at the end, always,
         # regardless of which parts succeeded -- that's the only thing that
         # clears `_pending`, so a clip with both video and audio can't have
@@ -378,11 +400,11 @@ class _TimelineCanvas(QWidget):
                 paths = filmstrip(
                     clip.media_ref.path,
                     span,
-                    count=FILMSTRIP_CACHE_COUNT,
+                    count=frame_count,
                     start=clip.source_in,
                     is_still_image=clip.media_ref.is_still_image,
                 )
-                self._signals.thumbnails_ready.emit(clip.id, paths)
+                self._signals.thumbnails_ready.emit(clip.id, frame_count, paths)
             except ThumbnailError:
                 pass
         if clip.media_ref.has_audio:
@@ -393,23 +415,23 @@ class _TimelineCanvas(QWidget):
                 self._signals.waveform_ready.emit(clip.id, peak_list)
             except WaveformError:
                 pass
-        self._signals.job_finished.emit(_asset_key(clip))
+        self._signals.job_finished.emit(job_key)
 
-    def _on_thumbnails_ready(self, clip_id: str, paths: list[Path]) -> None:
+    def _on_thumbnails_ready(self, clip_id: str, frame_count: int, paths: list[Path]) -> None:
         clip = self._find_clip(clip_id)
         if clip is None:
             return
-        self._thumbnails[_asset_key(clip)] = [QPixmap(str(p)) for p in paths]
+        self._thumbnails[_thumbnail_key(clip, frame_count)] = [QPixmap(str(p)) for p in paths]
         self.update()
 
     def _on_waveform_ready(self, clip_id: str, peak_list: list[Peak]) -> None:
         clip = self._find_clip(clip_id)
         if clip is None:
             return
-        self._waveforms[_asset_key(clip)] = peak_list
+        self._waveforms[_clip_key(clip)] = peak_list
         self.update()
 
-    def _on_job_finished(self, key: AssetKey) -> None:
+    def _on_job_finished(self, key: ThumbnailKey) -> None:
         self._pending.discard(key)
 
     def _find_clip(self, clip_id: str) -> Clip | None:
