@@ -91,12 +91,19 @@ class Player:
         Reuses the same file across calls (overwriting it) rather than
         making a new one per edit, since the EDL is regenerated after every
         timeline change.
+
+        Written with explicit `newline="\\n"` and UTF-8: on Windows,
+        `write_text`'s defaults turn `\\n` into `\\r\\n` -- and mpv only
+        recognizes an EDL whose first line is exactly `# mpv EDL v0\\n`, so
+        it rejects the whole file as an unrecognized format -- and encode
+        with the ANSI codepage, which breaks `edl.py`'s length prefixes
+        (counted in UTF-8 bytes) for any non-ASCII path.
         """
         if self._edl_path is None:
             handle = NamedTemporaryFile(suffix=".edl", delete=False)
             self._edl_path = Path(handle.name)
             handle.close()
-        self._edl_path.write_text(edl_text)
+        self._edl_path.write_text(edl_text, encoding="utf-8", newline="\n")
         self._mpv.play(str(self._edl_path))
 
     def wait_until_ready(self, timeout: float = 5.0) -> bool:

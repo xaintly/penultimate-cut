@@ -25,7 +25,7 @@ def play_duration(tmp_path: Path, edl_text: str, timeout: float = 8.0) -> float 
     """Write `edl_text` to disk and have a headless libmpv load it, returning
     the duration it reports (None if it never reached a playable state)."""
     edl_path = tmp_path / "preview.edl"
-    edl_path.write_text(edl_text)
+    edl_path.write_text(edl_text, encoding="utf-8", newline="\n")
     player = mpv.MPV(vo="null", ao="null", load_unsafe_playlists=True)
     try:
         player.play(str(edl_path))
