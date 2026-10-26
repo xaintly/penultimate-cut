@@ -1,3 +1,4 @@
+import subprocess
 from fractions import Fraction
 from pathlib import Path
 
@@ -57,3 +58,30 @@ def test_probe_non_media_file_raises(tmp_path: Path) -> None:
     bogus.write_text("not a real media file")
     with pytest.raises(ProbeError):
         probe(bogus)
+
+
+def test_probe_reports_rotated_phone_video_in_display_orientation(
+    tmp_path: Path, make_video_clip
+) -> None:
+    # Phones store portrait video as landscape frames plus a rotation tag.
+    stored = make_video_clip("stored_landscape.mp4", duration=1.0, fps=30, size="320x240")
+    rotated = tmp_path / "phone_portrait.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-display_rotation", "90",
+         "-i", str(stored), "-c", "copy", str(rotated)],
+        check=True,
+    )  # fmt: skip
+    info = probe(rotated)
+    assert (info.width, info.height) == (240, 320)
+
+
+def test_probe_reports_non_square_pixels_at_display_width(tmp_path: Path) -> None:
+    anamorphic = tmp_path / "anamorphic.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc2=duration=1:size=320x240:rate=30",
+         "-vf", "setsar=4/3", "-c:v", "libx264", str(anamorphic)],
+        check=True,
+    )  # fmt: skip
+    info = probe(anamorphic)
+    assert (info.width, info.height) == (426, 240)  # 320 * 4/3, truncated to even

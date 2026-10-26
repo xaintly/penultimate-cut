@@ -1,9 +1,11 @@
 """ffprobe wrapper: inspect a media file on disk and report what it contains.
 
-NOTE: phone-recorded rotation metadata (the mp4 "display matrix") isn't read
-here. Handling it belongs with Phase 2's Rotate feature, which needs the same
-information to drive the Fit Mode default — flagging here rather than adding
-a half-built heuristic now.
+Width/height are the **display** size -- what a viewer actually sees -- not
+the stored frame size: phone video is often stored sideways with a rotation
+tag (the mp4 "display matrix"), and some footage (DV, old camcorders) has
+non-square pixels. ffmpeg and mpv both apply rotation automatically when
+decoding, and export/filtergraph.py squares the pixels, so the display size
+is the size every other part of the app actually works with.
 """
 
 from __future__ import annotations
@@ -59,8 +61,7 @@ def probe(path: Path) -> MediaInfo:
     is_still_image = video_stream is not None and _is_still_image(data, video_stream)
 
     frame_rate = None if is_still_image or video_stream is None else _frame_rate(video_stream)
-    width = video_stream.get("width") if video_stream else None
-    height = video_stream.get("height") if video_stream else None
+    width, height = _display_size(video_stream) if video_stream else (None, None)
 
     duration: Fraction
     if is_still_image:
@@ -89,6 +90,48 @@ def _is_still_image(data: dict, video_stream: dict) -> bool:
     if "duration" in video_stream or "nb_frames" in video_stream:
         return False
     return "duration" not in data.get("format", {})
+
+
+def _display_size(video_stream: dict) -> tuple[int | None, int | None]:
+    width, height = video_stream.get("width"), video_stream.get("height")
+    if not width or not height:
+        return width, height
+    sar = _ratio(video_stream.get("sample_aspect_ratio"))
+    if sar is not None and sar != 1:
+        # Same rounding as export/filtergraph.py's square-pixel scale (trunc to even).
+        width = max(2, int(width * sar / 2) * 2)
+    if _rotation(video_stream) % 180 == 90:
+        width, height = height, width
+    return width, height
+
+
+def _rotation(video_stream: dict) -> int:
+    """Degrees, from the display matrix (current ffprobe) or the older
+    `rotate` tag; 0 if neither is there."""
+    for side_data in video_stream.get("side_data_list", []):
+        if "rotation" in side_data:
+            try:
+                return round(float(side_data["rotation"]))
+            except (TypeError, ValueError):
+                return 0
+    try:
+        return int(video_stream.get("tags", {}).get("rotate", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _ratio(raw: str | None) -> Fraction | None:
+    """ "4:3" -> Fraction(4, 3); None for missing or "0:1" (unknown)."""
+    if not raw or ":" not in raw:
+        return None
+    num_str, _, den_str = raw.partition(":")
+    try:
+        num, den = int(num_str), int(den_str)
+    except ValueError:
+        return None
+    if num <= 0 or den <= 0:
+        return None
+    return Fraction(num, den)
 
 
 def _frame_rate(video_stream: dict) -> Fraction | None:

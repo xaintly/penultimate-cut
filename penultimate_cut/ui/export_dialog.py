@@ -55,7 +55,7 @@ from penultimate_cut.model.project import Project
 from penultimate_cut.ui.format import format_duration
 
 _RESOLUTION_LABELS: dict[ResolutionChoice, str] = {
-    "project": "Same as project",
+    "auto": "Automatic",  # shown with its actual size, e.g. "Automatic (1920×1080)"
     "1080p": "1080p",
     "720p": "720p",
     "480p": "480p",
@@ -99,6 +99,9 @@ class ExportDialog(QDialog):
 
         self._resolution_combo = QComboBox()
         for resolution_value, label in _RESOLUTION_LABELS.items():
+            if resolution_value == "auto":
+                auto_width, auto_height = target_resolution(project, "auto")
+                label = f"{label} ({auto_width}×{auto_height})"
             self._resolution_combo.addItem(label, resolution_value)
 
         self._quality_combo = QComboBox()

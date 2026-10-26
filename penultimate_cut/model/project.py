@@ -95,7 +95,7 @@ class Project:
     frame_rate: Rate
     tracks: list[Track] = field(default_factory=list)
     name: str = "Untitled"
-    schema_version: int = 1
+    schema_version: int = 2  # io/otio_io.py's SCHEMA_VERSION
 
     @property
     def duration(self) -> Fraction:
@@ -113,20 +113,67 @@ def default_clip_for(media_ref: MediaRef) -> Clip:
     return Clip(media_ref=media_ref, source_in=Fraction(0), source_out=media_ref.duration)
 
 
-def reference_resolution(
-    project: Project, default: tuple[int, int] = (1280, 720)
+DEFAULT_RESOLUTION = (1280, 720)
+"""Used before the project has any video clip (e.g. the export dialog's size
+estimate on an empty project)."""
+
+AUTO_MAX_SHORT_SIDE = 1080
+""""Automatic" never goes above 1080p: one 4K clip shouldn't turn a class
+video into a huge 4K export."""
+
+
+def auto_resolution(
+    project: Project,
+    default: tuple[int, int] = DEFAULT_RESOLUTION,
+    max_short_side: int = AUTO_MAX_SHORT_SIDE,
 ) -> tuple[int, int]:
-    """Width/height of the first real video clip found, for things (preview gap
-    filler, export letterboxing) that need *some* resolution to work against.
-    Falls back to `default` if the project has no video clip yet."""
-    for track in project.tracks:
-        if track.kind != "video":
-            continue
-        for item in track.items:
-            if (
-                isinstance(item, Clip)
-                and item.media_ref.width is not None
-                and item.media_ref.height is not None
-            ):
-                return item.media_ref.width, item.media_ref.height
-    return default
+    """The output size that suits this project's clips: export's
+    "Automatic" choice, and the size the preview's gap filler uses.
+
+    - **Shape:** whichever shape (aspect ratio, to one decimal place, so
+      1920x1080 and 854x480 count as the same) covers the most timeline
+      time -- mostly landscape gives landscape, an all-phone project stays
+      vertical. A tie goes to the shape that appears first.
+    - **Size:** the sharpest clip of that shape (largest short side; its
+      exact ratio too), capped at `max_short_side`. Never larger than the
+      clips themselves.
+
+    Clips of other shapes are fitted into it by their Fit mode. Media sizes
+    are display sizes (see media/probe.py), so rotated phone video counts
+    as vertical.
+    """
+    sized = [
+        (item, item.media_ref.width, item.media_ref.height)
+        for track in project.tracks
+        if track.kind == "video"
+        for item in track.items
+        if isinstance(item, Clip) and item.media_ref.width and item.media_ref.height
+    ]
+    if not sized:
+        return default
+
+    time_by_shape: dict[float, Fraction] = {}
+    for clip, width, height in sized:
+        shape = _shape(width, height)
+        time_by_shape[shape] = time_by_shape.get(shape, Fraction(0)) + clip.duration
+    # max() returns the first of equal maxima; dicts keep timeline order.
+    winner = max(time_by_shape, key=time_by_shape.__getitem__)
+    in_shape = [(c, w, h) for c, w, h in sized if _shape(w, h) == winner]
+
+    _, ratio_w, ratio_h = max(
+        in_shape, key=lambda entry: (min(entry[1], entry[2]), entry[0].duration)
+    )
+    short = min(ratio_w, ratio_h, max_short_side)
+    if ratio_w >= ratio_h:
+        return even(Fraction(short * ratio_w, ratio_h)), even(Fraction(short))
+    return even(Fraction(short)), even(Fraction(short * ratio_h, ratio_w))
+
+
+def even(value: Fraction) -> int:
+    """Nearest even whole number (at least 2) -- H.264 with yuv420p needs
+    even frame dimensions."""
+    return max(2, round(value / 2) * 2)
+
+
+def _shape(width: int, height: int) -> float:
+    return round(width / height, 1)

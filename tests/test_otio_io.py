@@ -1,3 +1,4 @@
+import subprocess
 from fractions import Fraction
 from pathlib import Path
 
@@ -215,3 +216,40 @@ def test_find_relink_candidates_returns_empty_for_no_matches(tmp_path: Path) -> 
     search_dir = tmp_path / "empty"
     search_dir.mkdir()
     assert find_relink_candidates([_missing_ref("clip_a.mp4")], search_dir) == {}
+
+
+def test_loading_a_version_1_project_remeasures_media_at_display_size(
+    tmp_path: Path, make_video_clip
+) -> None:
+    # Version 1 stored a rotated phone clip's raw (sideways) frame size.
+    stored = make_video_clip("otio_v1_stored.mp4", duration=1.0, fps=30, size="320x240")
+    rotated = tmp_path / "phone.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-display_rotation", "90",
+         "-i", str(stored), "-c", "copy", str(rotated)],
+        check=True,
+    )  # fmt: skip
+    media = MediaRef(
+        path=rotated,
+        relative_path=None,
+        duration=Fraction(1),
+        frame_rate=Fraction(30),
+        has_video=True,
+        has_audio=False,
+        width=320,
+        height=240,
+    )
+    clip = Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(1))
+    project_path = tmp_path / "old.otio"
+    save_project(
+        Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip])]), project_path
+    )
+    text = project_path.read_text(encoding="utf-8")
+    assert '"schema_version": 2' in text
+    project_path.write_text(text.replace('"schema_version": 2', '"schema_version": 1'), "utf-8")
+
+    loaded = load_project(project_path).project
+
+    loaded_media = loaded.tracks[0].items[0].media_ref
+    assert (loaded_media.width, loaded_media.height) == (240, 320)
+    assert loaded.schema_version == 2

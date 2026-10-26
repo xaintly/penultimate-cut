@@ -89,7 +89,7 @@ def test_target_resolution_works_on_an_empty_project() -> None:
     # with nothing in it yet -- the export dialog's live size estimate
     # calls it before the user has necessarily imported anything.
     project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[])])
-    assert target_resolution(project, "project") == (1280, 720)
+    assert target_resolution(project, "auto") == (1280, 720)
     assert target_resolution(project, "720p") == (1280, 720)
 
 
@@ -191,7 +191,7 @@ def test_fit_mode_produces_expected_filter_shape(
     clip = Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(2), fit_mode=fit_mode)
     project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip])])
 
-    plan = build_filtergraph(project, resolution="project")
+    plan = build_filtergraph(project, resolution="auto")
 
     assert plan.width == 640 and plan.height == 480
     assert expected_substring in plan.filter_complex
@@ -206,6 +206,15 @@ def test_resolution_choice_scales_down_preserving_aspect(tmp_path: Path) -> None
 
     assert plan.height == 720
     assert plan.width == 1280
+
+
+def test_resolution_choice_applies_to_the_short_side_of_vertical_video(tmp_path: Path) -> None:
+    # "720p" for a phone video is 720x1280, not a tiny 405x720.
+    media = make_media(tmp_path / "a.mp4", width=1080, height=1920)
+    clip = Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(2))
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip])])
+
+    assert target_resolution(project, "720p") == (720, 1280)
 
 
 def test_resolution_choice_never_upscales(tmp_path: Path) -> None:

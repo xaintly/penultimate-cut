@@ -17,6 +17,7 @@ this module never prompts.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -24,11 +25,18 @@ from uuid import uuid4
 
 import opentimelineio as otio
 
+from penultimate_cut.media.probe import ProbeError, probe
 from penultimate_cut.model.project import Clip, Gap, MediaRef, Project, Track, TrackItem, TrackKind
 from penultimate_cut.model.time import Rate, frame_to_seconds, seconds_to_frame
 
 METADATA_KEY = "penultimate_cut"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+"""Version history (bump + add a migration in `_migrate` on every change):
+
+1. Initial.
+2. Media width/height are the *display* size (rotation and non-square
+   pixels applied -- see media/probe.py), not the stored frame size.
+"""
 
 _ADAPTER_NAME = "otio_json"
 """Passed explicitly rather than left for OTIO to guess from the file's
@@ -111,7 +119,7 @@ def _resolve_media_path(
 def _project_to_timeline(project: Project, path: Path) -> otio.schema.Timeline:
     timeline = otio.schema.Timeline(name=project.name)
     timeline.metadata[METADATA_KEY] = {
-        "schema_version": project.schema_version,
+        "schema_version": SCHEMA_VERSION,
         "frame_rate": str(project.frame_rate),
     }
     for track in project.tracks:
@@ -138,7 +146,23 @@ def _timeline_to_project(timeline: otio.schema.Timeline, path: Path) -> LoadResu
         if not found:
             missing[media_ref.id] = media_ref
 
+    _migrate(schema_version, media_cache.values())
+    project.schema_version = SCHEMA_VERSION
+
     return LoadResult(project=project, missing_media=list(missing.values()))
+
+
+def _migrate(schema_version: int, media: Iterable[tuple[MediaRef, bool]]) -> None:
+    if schema_version < 2:
+        # Re-measure video media at its display size. Media that's missing
+        # (or no longer probes) keeps its old, possibly sideways, size.
+        for media_ref, found in media:
+            if found and media_ref.has_video:
+                try:
+                    info = probe(media_ref.path)
+                except ProbeError:
+                    continue
+                media_ref.width, media_ref.height = info.width, info.height
 
 
 # --- Track / items -------------------------------------------------------------

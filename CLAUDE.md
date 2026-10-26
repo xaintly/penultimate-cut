@@ -204,7 +204,11 @@ may be off-screen), as one undoable edit.
 
 Export dialog has **three choices only**:
 
-- **Resolution:** Same as project · 1080p · 720p · 480p · 360p
+- **Resolution:** Automatic (shown with its size, e.g. "Automatic (1920×1080)") ·
+  1080p · 720p · 480p · 360p. Automatic (`model/project.py: auto_resolution`) takes
+  the shape covering the most timeline time and the sharpest clip of that shape,
+  capped at 1080p; never decided by just the first clip. The named sizes apply to the
+  short side (720p vertical = 720×1280) and never upscale.
 - **Quality:** Small file · Balanced · High quality
 - **File:** name and location
 
@@ -216,6 +220,9 @@ This plays in every browser, LMS, and media player that matters.
 - Small file: aggressive compression, lower audio bitrate (good for narrated slides
   and mostly-static video).
 - Project frame rate defaults to the first video clip's rate; other clips are conformed.
+- Media sizes are **display** sizes (phone rotation tags and non-square pixels
+  applied, in `media/probe.py`); export squares pixels and stamps every segment
+  SAR 1:1, which ffmpeg's concat requires.
 - Mixed aspect ratios (vertical phone video, old 4:3 footage): per-clip **Fit mode**
   - **Black bars** (letterbox/pillarbox) — default
   - **Blurred background** — the clip scaled to cover the frame, cropped, heavily

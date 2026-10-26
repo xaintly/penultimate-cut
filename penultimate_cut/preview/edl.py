@@ -41,7 +41,7 @@ from penultimate_cut.model.project import (
     Project,
     TrackItem,
     TrackKind,
-    reference_resolution,
+    auto_resolution,
 )
 from penultimate_cut.model.time import format_seconds
 
@@ -56,7 +56,7 @@ class EDLError(ValueError):
 
 def to_edl(project: Project) -> str:
     """Render `project` as mpv EDL text. Empty tracks are omitted."""
-    width, height = reference_resolution(project)
+    width, height = auto_resolution(project)
     lines = [HEADER]
     for track in project.tracks:
         if not track.items:

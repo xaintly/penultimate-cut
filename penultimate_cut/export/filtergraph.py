@@ -30,12 +30,14 @@ from dataclasses import dataclass
 from fractions import Fraction
 from typing import Literal
 
-from penultimate_cut.model.project import Clip, FitMode, Gap, Project, reference_resolution
+from penultimate_cut.model.project import Clip, FitMode, Gap, Project, auto_resolution, even
 from penultimate_cut.model.time import format_seconds
 
-ResolutionChoice = Literal["project", "1080p", "720p", "480p", "360p"]
+ResolutionChoice = Literal["auto", "1080p", "720p", "480p", "360p"]
 
-_RESOLUTION_HEIGHTS: dict[str, int] = {"1080p": 1080, "720p": 720, "480p": 480, "360p": 360}
+_RESOLUTION_SHORT_SIDES: dict[str, int] = {"1080p": 1080, "720p": 720, "480p": 480, "360p": 360}
+""""720p" means 720 on the *short* side -- 1280x720 landscape, 720x1280
+vertical -- the way phones and video sites use the term."""
 _GAP_AUDIO_RATE = 48000
 _OUTPUT_AUDIO_RATE = 48000
 _OUTPUT_CHANNEL_LAYOUT = "stereo"
@@ -57,7 +59,7 @@ class FFmpegPlan:
     frame_rate: Fraction
 
 
-def build_filtergraph(project: Project, resolution: ResolutionChoice = "project") -> FFmpegPlan:
+def build_filtergraph(project: Project, resolution: ResolutionChoice = "auto") -> FFmpegPlan:
     """Build the input list and filter_complex for exporting `project`."""
     if len(project.tracks) != 1:
         raise FiltergraphError("export only supports a single track for now")
@@ -213,21 +215,18 @@ def _fit_stage(fit_mode: FitMode, width: int, height: int, in_label: str, out_la
 def target_resolution(project: Project, resolution: ResolutionChoice) -> tuple[int, int]:
     """The actual output width/height `build_filtergraph` would use for this
     resolution choice. Public (not just an internal helper) because the
-    export dialog's live file-size estimate needs it too, and unlike
-    `build_filtergraph` it works on any project -- including an empty one,
-    via `reference_resolution`'s fallback -- rather than requiring one
-    that's actually exportable."""
-    ref_width, ref_height = reference_resolution(project)
-    if resolution == "project":
-        return ref_width, ref_height
+    export dialog's live file-size estimate and its "Automatic (WxH)" label
+    need it too, and unlike `build_filtergraph` it works on any project --
+    including an empty one, via `auto_resolution`'s fallback -- rather than
+    requiring one that's actually exportable."""
+    width, height = auto_resolution(project)
+    if resolution == "auto":
+        return width, height
 
-    target_height = _RESOLUTION_HEIGHTS[resolution]
-    if target_height >= ref_height:
-        # Never upscale past the source's own resolution.
-        return ref_width, ref_height
-
-    aspect = Fraction(ref_width, ref_height)
-    width = round(target_height * aspect)
-    width += width % 2
-    height = target_height + target_height % 2
-    return width, height
+    target_short = _RESOLUTION_SHORT_SIDES[resolution]
+    current_short = min(width, height)
+    if target_short >= current_short:
+        # Never upscale past the clips' own resolution.
+        return width, height
+    scale = Fraction(target_short, current_short)
+    return even(width * scale), even(height * scale)
