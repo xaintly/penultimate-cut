@@ -8,15 +8,39 @@ copyrighted sample files.
 from __future__ import annotations
 
 import atexit
+import faulthandler
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 
 import pytest
 from PySide6.QtWidgets import QApplication
+
+from penultimate_cut.media.executables import vendor_dir
+
+# Same vendor/-on-PATH setup as app.py, for the same reason: python-mpv only
+# finds libmpv-2.dll on Windows via PATH, and it looks once, at `import mpv`
+# -- which happens during collection (see below), so it has to be here at
+# module level. Harmless no-op on Linux.
+os.environ["PATH"] = str(vendor_dir()) + os.pathsep + os.environ.get("PATH", "")
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_configure(config: pytest.Config) -> None:
+    # Windows only: undo pytest's faulthandler plugin (trylast = after it has
+    # enabled it). On Windows, faulthandler dumps a traceback for *every*
+    # native exception, including ones that get caught -- and mpv's LuaJIT
+    # scripts raise and catch them (code 0xe24c4a02) routinely. Dumping
+    # Python frames from inside one of those, on mpv's thread, intermittently
+    # crashes the whole run with an access violation; confirmed empirically:
+    # runs with it on crashed, repeated runs with it off never did.
+    if sys.platform == "win32":
+        faulthandler.disable()
+
 
 # Module level, not inside a fixture, and unconditional (no "if a test needs
 # it" gating): some test modules import penultimate_cut.ui.preview_widget (and
