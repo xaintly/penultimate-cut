@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from penultimate_cut.media.executables import vendor_dir
@@ -87,6 +88,15 @@ _qapp_instance = QApplication.instance() or QApplication([])
 _autosave_dir = tempfile.mkdtemp(prefix="penultimate_cut_test_autosave_")
 os.environ["PENULTIMATE_CUT_AUTOSAVE_DIR"] = _autosave_dir
 atexit.register(shutil.rmtree, _autosave_dir, True)
+
+# Same for app settings (ui/settings.py: QSettings -> the real registry on
+# Windows) and the default Videos\PenultimateCut folder: tests must neither
+# read the developer's own preferences nor create folders in their Videos.
+_settings_dir = tempfile.mkdtemp(prefix="penultimate_cut_test_settings_")
+QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, _settings_dir)
+os.environ["PENULTIMATE_CUT_DEFAULT_DIR"] = str(Path(_settings_dir) / "default_folder")
+atexit.register(shutil.rmtree, _settings_dir, True)
 
 
 @pytest.fixture(scope="session")

@@ -213,6 +213,16 @@ class Player:
     def speed(self, value: Fraction) -> None:
         self._mpv.speed = float(value)
 
+    @property
+    def volume(self) -> int:
+        """Playback volume, 0-100 -- preview only; export never sees it."""
+        return round(self._mpv.volume)
+
+    @volume.setter
+    def volume(self, value: int) -> None:
+        with contextlib.suppress(SystemError):
+            self._mpv.volume = max(0, min(100, value))
+
     def on_position_changed(self, callback: Callable[[Fraction | None], None]) -> None:
         """Register `callback` to fire whenever mpv's playback position changes
         (several times a second during playback) -- drives the UI playhead."""

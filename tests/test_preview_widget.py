@@ -154,3 +154,26 @@ def test_slider_drag_seeks_the_player(qapp, widget, make_video_clip) -> None:
     assert widget._dragging is False
 
     assert widget.player.position == Fraction("1.5")
+
+
+def test_button_says_play_before_anything_is_loaded(qapp) -> None:
+    # A fresh widget (the shared one has already played), with vo=null so a
+    # second instance doesn't hit the GL-teardown hang `widget` describes.
+    fresh = PreviewWidget(vo="null")
+    try:
+        pump(qapp, 0.3)
+        assert fresh._play_button.text() == "Play"
+    finally:
+        fresh.shutdown()
+
+
+def test_volume_slider_sets_player_volume_and_reports_changes(widget) -> None:
+    reported: list[int] = []
+    widget.volume_changed.connect(reported.append)
+    try:
+        widget.set_volume(40)
+        assert widget.player.volume == 40
+        assert reported == [40]
+    finally:
+        widget.volume_changed.disconnect(reported.append)
+        widget.set_volume(100)

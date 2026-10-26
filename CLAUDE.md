@@ -148,6 +148,13 @@ vendor/                  # ffmpeg.exe, ffprobe.exe, libmpv-2.dll (gitignored; fe
   the schema changes.
 - **Autosave** every 60 seconds (and on export start) to `<project>.otio.autosave`.
   On launch, if an autosave is newer than its project, offer to recover it.
+- **Default folder:** `Videos\PenultimateCut` (the user's Videos folder as Windows
+  reports it, since it can be moved), created on first use. New projects are saved
+  there; exports default to `<project name>.mp4` next to the project, never
+  overwriting an existing file. A setting to change this folder is a Phase 2 candidate.
+- **App settings** (not per-project, e.g. preview volume) live in `QSettings`
+  (`ui/settings.py`), never in the `.otio`. The preview volume slider only affects
+  playback while editing, never the export.
 
 ---
 

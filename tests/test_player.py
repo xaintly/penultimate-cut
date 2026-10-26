@@ -215,3 +215,13 @@ def test_load_edl_can_start_mid_timeline(make_video_clip) -> None:
         assert player.wait_until_ready()
         position = player.position
         assert position is not None and abs(position - 2) < Fraction(1, 10)
+
+
+def test_volume_is_clamped_to_0_100() -> None:
+    with Player() as player:
+        player.volume = 35
+        assert player.volume == 35
+        player.volume = 150
+        assert player.volume == 100
+        player.volume = -5
+        assert player.volume == 0

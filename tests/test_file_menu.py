@@ -348,3 +348,35 @@ def test_offer_relink_declined_leaves_media_missing(
         window.undo_stack.setClean()
         window.close()
         qapp.processEvents()
+
+
+def test_dialogs_default_to_the_app_folder_then_the_project_folder(
+    qapp, tmp_path, monkeypatch
+) -> None:
+    app_folder = tmp_path / "Videos" / "PenultimateCut"
+    monkeypatch.setenv("PENULTIMATE_CUT_DEFAULT_DIR", str(app_folder))
+    window = make_window()
+    try:
+        offered: list[str] = []
+
+        def fake_save(_parent, _caption, directory, _filter):
+            offered.append(directory)
+            return ("", "")
+
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", fake_save)
+        window._save_project_as()
+        assert offered == [str(app_folder / "Untitled.otio")]
+        assert window._default_export_path() == app_folder / "Untitled.mp4"
+
+        # Once saved, exports go next to the project, named after it, and
+        # never on top of an earlier export.
+        project_dir = tmp_path / "elsewhere"
+        project_dir.mkdir()
+        window._current_path = project_dir / "Lab report.otio"
+        assert window._default_export_path() == project_dir / "Lab report.mp4"
+        (project_dir / "Lab report.mp4").touch()
+        assert window._default_export_path() == project_dir / "Lab report (2).mp4"
+    finally:
+        window.undo_stack.setClean()
+        window.close()
+        qapp.processEvents()

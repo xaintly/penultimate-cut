@@ -78,7 +78,12 @@ class _ExportSignals(QObject):
 
 
 class ExportDialog(QDialog):
-    def __init__(self, project: Project, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        project: Project,
+        default_path: Path | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Export")
         self._project = project
@@ -100,7 +105,7 @@ class ExportDialog(QDialog):
             self._quality_combo.addItem(label, quality_value)
         self._quality_combo.setCurrentIndex(_DEFAULT_QUALITY_INDEX)
 
-        self._path_edit = QLineEdit(str(Path.home() / "export.mp4"))
+        self._path_edit = QLineEdit(str(default_path or Path.home() / "export.mp4"))
         browse_button = QPushButton("Browse…")
         browse_button.clicked.connect(self._choose_path)
         path_row = QHBoxLayout()

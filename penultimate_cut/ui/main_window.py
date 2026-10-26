@@ -87,6 +87,12 @@ from penultimate_cut.ui.clip_properties import ClipPropertiesPanel
 from penultimate_cut.ui.export_dialog import ExportDialog
 from penultimate_cut.ui.media_bin import MediaBin, MediaBinEntry
 from penultimate_cut.ui.preview_widget import PreviewWidget
+from penultimate_cut.ui.settings import (
+    default_folder,
+    load_preview_volume,
+    save_preview_volume,
+    unique_path,
+)
 from penultimate_cut.ui.timeline.widget import TimelineWidget
 
 _PROJECT_FILE_FILTER = "Penultimate Cut project (*.otio)"
@@ -157,6 +163,8 @@ class MainWindow(QMainWindow):
         self.timeline.media_dropped.connect(self._on_media_dropped)
         self.timeline.playhead_moved.connect(self.preview.seek)
         self.preview.position_changed.connect(self._on_preview_position_changed)
+        self.preview.set_volume(load_preview_volume())
+        self.preview.volume_changed.connect(save_preview_volume)
         self.undo_stack.indexChanged.connect(self._on_undo_stack_changed)
         self.timeline.selection_changed.connect(self._on_timeline_selection_changed)
         self.clip_properties.fit_mode_changed.connect(self._on_fit_mode_changed)
@@ -241,7 +249,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard_if_dirty():
             return
         path_str, _ = QFileDialog.getOpenFileName(
-            self, "Open project", str(Path.home()), _PROJECT_FILE_FILTER
+            self, "Open project", str(self._project_folder()), _PROJECT_FILE_FILTER
         )
         if not path_str:
             return
@@ -276,7 +284,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _save_project_as(self) -> bool:
-        default_path = self._current_path or (Path.home() / "Untitled.otio")
+        default_path = self._current_path or (default_folder() / "Untitled.otio")
         path_str, _ = QFileDialog.getSaveFileName(
             self, "Save project", str(default_path), _PROJECT_FILE_FILTER
         )
@@ -509,7 +517,21 @@ class MainWindow(QMainWindow):
 
     def _open_export_dialog(self) -> None:
         self._autosave()
-        ExportDialog(self.project, self).exec()
+        ExportDialog(self.project, self._default_export_path(), self).exec()
+
+    def _project_folder(self) -> Path:
+        """The current project's folder, or the app's default folder for a
+        project that hasn't been saved yet."""
+        if self._current_path is not None:
+            return self._current_path.parent
+        return default_folder()
+
+    def _default_export_path(self) -> Path:
+        """`<project name>.mp4` next to the project -- never an existing
+        file, so accepting the default can't silently overwrite an earlier
+        export."""
+        stem = self._current_path.stem if self._current_path is not None else "Untitled"
+        return unique_path(self._project_folder() / f"{stem}.mp4")
 
     def _refresh_clip_properties(self) -> None:
         """Re-derive the displayed clip from `_selected_index` and the

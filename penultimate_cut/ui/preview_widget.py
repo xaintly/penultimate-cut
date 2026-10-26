@@ -33,6 +33,7 @@ class PreviewWidget(QWidget):
     position_changed = Signal(
         object
     )  # Fraction | None; object avoids a C++ signal type for Fraction
+    volume_changed = Signal(int)  # 0-100, from the user moving the volume slider
     _playing_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None, **player_options: object) -> None:
@@ -56,6 +57,13 @@ class PreviewWidget(QWidget):
         self._time_label = QLabel("00:00 / 00:00")
         self._slider = QSlider(Qt.Orientation.Horizontal)
         self._slider.setRange(0, 0)
+        # Preview volume only -- how loud *this playback* is while editing.
+        # Not part of the project, never affects export.
+        self._volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self._volume_slider.setRange(0, 100)
+        self._volume_slider.setFixedWidth(90)
+        self._volume_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # keep ←/→ for frame stepping
+        self._volume_slider.setToolTip("Preview volume (doesn't change the exported video)")
 
         transport = QHBoxLayout()
         transport.addWidget(self._back_button)
@@ -63,6 +71,9 @@ class PreviewWidget(QWidget):
         transport.addWidget(self._forward_button)
         transport.addWidget(self._slider)
         transport.addWidget(self._time_label)
+        transport.addSpacing(12)
+        transport.addWidget(QLabel("Volume"))
+        transport.addWidget(self._volume_slider)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._video_surface, 1)
@@ -90,6 +101,8 @@ class PreviewWidget(QWidget):
         self._slider.sliderPressed.connect(self._on_slider_pressed)
         self._slider.sliderReleased.connect(self._on_slider_released)
         self._slider.sliderMoved.connect(self._on_slider_moved)
+        self._volume_slider.setValue(self._player.volume)
+        self._volume_slider.valueChanged.connect(self._on_volume_slider_changed)
 
     # --- lifecycle -------------------------------------------------------------
 
@@ -143,6 +156,22 @@ class PreviewWidget(QWidget):
 
     def frame_step(self, direction: FrameStepDirection = "forward") -> None:
         self._player.frame_step(direction)
+
+    # --- preview volume -------------------------------------------------------------
+
+    @property
+    def volume(self) -> int:
+        return self._volume_slider.value()
+
+    def set_volume(self, volume: int) -> None:
+        self._volume_slider.setValue(volume)  # -> _on_volume_slider_changed
+
+    def _on_volume_slider_changed(self, volume: int) -> None:
+        self._player.volume = volume
+        self._volume_slider.setToolTip(
+            f"Preview volume: {volume}% (doesn't change the exported video)"
+        )
+        self.volume_changed.emit(volume)
 
     # --- internal: slider <-> player position sync -------------------------------
 
