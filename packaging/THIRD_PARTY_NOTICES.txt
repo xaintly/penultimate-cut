@@ -1,0 +1,52 @@
+Penultimate Cut - license notices
+=================================
+
+Penultimate Cut is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. It is distributed WITHOUT ANY WARRANTY. The full license text
+is in GPL-3.0.txt in this folder.
+
+Source code: https://github.com/xaintly/penultimate-cut
+(each release is tagged there, e.g. v1.0)
+
+
+Bundled software
+----------------
+
+FFmpeg (ffmpeg.exe, ffprobe.exe in the vendor folder)
+  A GPL build including libx264 and other GPL components, so it is
+  distributed under the GNU General Public License, version 3 (GPL-3.0.txt).
+  Its own notice, listing the components it includes, is FFmpeg-LICENSE.txt.
+  Build: BtbN FFmpeg-Builds, https://github.com/BtbN/FFmpeg-Builds
+  Source: https://ffmpeg.org and https://github.com/FFmpeg/FFmpeg; the exact
+  version is in BUILD_SOURCES.txt, and the build scripts that produced it
+  (with every component's source location) are in the BtbN repository.
+
+libmpv (libmpv-2.dll in the vendor folder)
+  mpv's library, built with GPL components, distributed under the GNU
+  General Public License, version 2 or later (used here under version 3,
+  GPL-3.0.txt).
+  Build: shinchiro mpv-winbuild-cmake,
+  https://github.com/shinchiro/mpv-winbuild-cmake
+  Source: https://github.com/mpv-player/mpv; the exact build is in
+  BUILD_SOURCES.txt.
+
+Qt for Python (PySide6, shiboken6) and Qt 6
+  Available under the GNU LGPL version 3 or GNU GPL version 2 or 3; used
+  here under the GNU GPL version 3 (GPL-3.0.txt), like the rest of the app.
+  The Qt libraries are separate files in the app folder and can be
+  replaced. Source: https://code.qt.io and https://download.qt.io
+
+python-mpv
+  GNU GPL version 2 or later, or GNU LGPL version 2.1 or later
+  (python-mpv-LICENSE.GPL.txt, python-mpv-LICENSE.LGPL.txt).
+  Source: https://github.com/jaseg/python-mpv
+
+OpenTimelineIO
+  Apache License 2.0 (OpenTimelineIO-LICENSE.txt, OpenTimelineIO-NOTICE.txt).
+  Source: https://github.com/AcademySoftwareFoundation/OpenTimelineIO
+
+Python
+  Python Software Foundation License (Python-LICENSE.txt).
+  Source: https://www.python.org

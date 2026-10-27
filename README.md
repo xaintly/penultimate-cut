@@ -63,3 +63,8 @@ mypy penultimate_cut/model penultimate_cut/export
 GPL-3.0-or-later (see `LICENSE`). The bundled ffmpeg build includes
 `libx264` for H.264 encoding, which is itself GPL-licensed -- distributing
 it requires the whole program to be GPL too.
+
+The installed app carries the licenses and source locations of everything it
+bundles (FFmpeg, mpv, Qt for Python, OpenTimelineIO, Python) in its `licenses`
+folder, linked from **Help → About**; see
+[`packaging/THIRD_PARTY_NOTICES.txt`](packaging/THIRD_PARTY_NOTICES.txt).

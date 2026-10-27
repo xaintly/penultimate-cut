@@ -77,6 +77,13 @@ If something seems missing, propose it in a note; don't implement it.
 - Keep the encoder choice behind one function (`export/encoders.py`) with `libx264` as
   the default and Windows' built-in Media Foundation encoder (`h264_mf`) as a fallback
   option, so the encoder can be switched without touching anything else.
+- **Shipping the licenses:** the installed app has a `licenses\` folder (GPL-3.0 text,
+  `THIRD_PARTY_NOTICES.txt` naming each bundled component, its license and source, the
+  ffmpeg build's own notice, and `BUILD_SOURCES.txt` with the exact ffmpeg/libmpv builds).
+  `scripts/fetch_vendor.ps1` writes the vendor parts; `gather_licenses()` in the
+  PyInstaller spec collects everything and fails the build if anything is missing.
+  **Help → About** shows the version, license, source link, and links to that folder.
+  Qt is used under its GPL-3.0 option, like the rest of the app.
 
 ---
 
@@ -110,7 +117,7 @@ penultimate_cut/
     media_bin.py
     timeline/            # custom-painted timeline widget
     preview_widget.py
-    clip_properties.py   # per-clip panel (volume, speed, fade, rotate, mute...)
+    clip_properties.py   # per-clip panel (fit mode, volume, mute, fades; later speed, rotate)
     export_dialog.py
 tests/
   conftest.py            # generates synthetic test media with ffmpeg lavfi
@@ -196,8 +203,9 @@ vendor/                  # ffmpeg.exe, ffprobe.exe, libmpv-2.dll (gitignored; fe
 | Home / End | Jump to start / end |
 
 Keys live on menu actions so the menus show them (**File**: Import Media…; **Edit**: Undo,
-Redo, Split, Delete Clip, Delete and Close Gap; **Play**: Play / Pause, Faster, Playback Speed ▸ 0.1×–10×, frame/second steps,
-Go to Start/End). Only Delete, Shift+Delete and +/− are plain shortcuts. No reverse
+Redo, Split, Delete Clip, Delete and Close Gap; **View**: Zoom In, Zoom Out; **Play**: Play /
+Pause, Faster, Playback Speed ▸ 0.1×–10×, frame/second steps, Go to Start/End; **Help**:
+About). Only Delete and Shift+Delete are plain shortcuts. No reverse
 play (J) or separate pause (K): clicking the timeline or stepping back covers it.
 The current speed shows next to the time when it isn't 1×.
 
@@ -279,6 +287,13 @@ This plays in every browser, LMS, and media player that matters.
 - **Undo/redo** for every edit.
 - Save/open projects (`.otio`), autosave + recovery, relink missing media.
 - Export (see Export section).
+- Pulled in from Phase 2 for 1.0: per-clip **volume** (0–200%) and **mute**, and **fade in
+  from black / fade out to black** (picture and sound, a fixed 1 s, shortened on short
+  clips; splitting keeps fades at the clip's outer ends). Set in the clip properties
+  panel; shown on the timeline (fade wedges, waveform height, "· muted"). Preview applies
+  them with one whole-timeline mpv filter chain switched on per clip span
+  (`preview/edl.py: preview_filters`); export applies them per clip segment.
+- An empty timeline shows "Drag videos here, or click Import".
 
 **Phase 1 is done when** the owner can take a narrated slideshow plus two phone clips,
 cut and rearrange them, and export a small MP4 that plays in a browser — without
@@ -290,10 +305,8 @@ reading any instructions.
 - Audio-only files (music, narration) on the timeline, via an additional audio track.
 - Additional audio track (music); **audio mix** slider (favor narration vs. music);
   optional automatic **ducking** under speech.
-- Per-clip volume and **mute**.
 - **Normalize loudness** across the whole project (ffmpeg `loudnorm`, two-pass) —
   for group projects merged from several contributors.
-- **Fade in from black / fade out to black** per clip.
 - **Transitions** between clips: cross-dissolve and fade-through-black only.
 - **Titles** (full-screen card before/after a clip), **captions** (text over a clip),
   **credits** (end card). A few clean built-in styles; font, size, color, position.

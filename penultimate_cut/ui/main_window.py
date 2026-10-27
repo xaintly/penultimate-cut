@@ -23,7 +23,8 @@ real widgets together:
   points at; and refreshes the window title's unsaved-changes marker.
 - Timeline selection -> the clip properties panel displays that clip (or
   clears itself for a gap or no selection); the panel's own Fit Mode
-  control -> a `SetFitModeCommand` for whichever clip is selected.
+  control -> a `SetFitModeCommand`, and its volume/mute/fade controls -> a
+  `SetClipOptionsCommand`, for whichever clip is selected.
 - Export button -> a modal `ExportDialog` for the current project.
 - File menu: New/Open/Save/Save As, each going through
   `_confirm_discard_if_dirty()` first if there are unsaved changes (tracked
@@ -79,7 +80,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from penultimate_cut.commands.timeline_commands import RemoveMediaCommand, SetFitModeCommand
+from penultimate_cut.commands.timeline_commands import (
+    RemoveMediaCommand,
+    SetClipOptionsCommand,
+    SetFitModeCommand,
+)
 from penultimate_cut.io.autosave import (
     discard_autosave,
     find_recoverable_autosave,
@@ -93,6 +98,7 @@ from penultimate_cut.io.otio_io import (
     save_project,
 )
 from penultimate_cut.model.project import Clip, FitMode, MediaRef, Project, Track, default_clip_for
+from penultimate_cut.ui.about_dialog import AboutDialog
 from penultimate_cut.ui.clip_properties import ClipPropertiesPanel
 from penultimate_cut.ui.export_dialog import ExportDialog
 from penultimate_cut.ui.format import format_speed
@@ -199,6 +205,7 @@ class MainWindow(QMainWindow):
         self.undo_stack.indexChanged.connect(self._on_undo_stack_changed)
         self.timeline.selection_changed.connect(self._on_timeline_selection_changed)
         self.clip_properties.fit_mode_changed.connect(self._on_fit_mode_changed)
+        self.clip_properties.options_changed.connect(self._on_clip_options_changed)
 
         self._init_shortcuts()
         self._update_window_title()
@@ -282,7 +289,20 @@ class MainWindow(QMainWindow):
         )
         edit_menu.aboutToShow.connect(self._update_edit_actions)
 
+        view_menu = self.menuBar().addMenu("&View")
+        zoom_in = view_menu.addAction("Zoom In")
+        zoom_in.setShortcut(QKeySequence("+"))
+        zoom_in.triggered.connect(self.timeline.zoom_in)
+        zoom_out = view_menu.addAction("Zoom Out")
+        zoom_out.setShortcut(QKeySequence("-"))
+        zoom_out.triggered.connect(self.timeline.zoom_out)
+
         self._build_play_menu()
+
+        help_menu = self.menuBar().addMenu("&Help")
+        help_menu.addAction("About Penultimate Cut").triggered.connect(
+            lambda: AboutDialog(self).exec()
+        )
 
     def _build_play_menu(self) -> None:
         play_menu = self.menuBar().addMenu("&Play")
@@ -332,8 +352,6 @@ class MainWindow(QMainWindow):
         shortcuts = [
             ("Delete", self._on_delete_key),
             ("Shift+Delete", lambda: self.timeline.delete_selected(ripple=True)),
-            ("+", self.timeline.zoom_in),
-            ("-", self.timeline.zoom_out),
         ]
         self._shortcuts = [QShortcut(QKeySequence(key), self) for key, _ in shortcuts]
         for shortcut, (_key, handler) in zip(self._shortcuts, shortcuts, strict=True):
@@ -620,6 +638,13 @@ class MainWindow(QMainWindow):
         if self._selected_index is None:
             return
         self.undo_stack.push(SetFitModeCommand(self.project, 0, self._selected_index, fit_mode))
+
+    def _on_clip_options_changed(self, text: str, options: dict) -> None:
+        if self._selected_index is None:
+            return
+        self.undo_stack.push(
+            SetClipOptionsCommand(text, self.project, 0, self._selected_index, **options)
+        )
 
     def _open_export_dialog(self) -> None:
         self._autosave()

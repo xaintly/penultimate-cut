@@ -28,9 +28,12 @@ would silently break this app:
   package).
 """
 
+import shutil
+import sys
+from importlib.metadata import distribution
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
 # Not __file__ -- PyInstaller exec()s this file directly rather than
 # importing it as a module, so __file__ is never defined here. SPECPATH
@@ -44,12 +47,50 @@ vendor_binaries = [
     (str(vendor_dir / name), "vendor") for name in ("ffmpeg.exe", "ffprobe.exe", "libmpv-2.dll")
 ]
 
+
+def gather_licenses() -> Path:
+    """Copy every license text and notice the app must ship with into one
+    folder (renamed so each says whose it is); it lands as licenses/ beside
+    the exe. Fails the build if any is missing rather than shipping without
+    it. See packaging/THIRD_PARTY_NOTICES.txt for what each covers."""
+    folder = Path(workpath) / "licenses"  # noqa: F821 -- injected by PyInstaller
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.mkdir(parents=True)
+    sources = {
+        "GPL-3.0.txt": repo_root / "LICENSE",
+        "THIRD_PARTY_NOTICES.txt": repo_root / "packaging" / "THIRD_PARTY_NOTICES.txt",
+        "Python-LICENSE.txt": Path(sys.base_prefix) / "LICENSE.txt",
+        # Written by scripts/fetch_vendor.ps1 from the downloaded builds.
+        "FFmpeg-LICENSE.txt": vendor_dir / "licenses" / "FFmpeg-LICENSE.txt",
+        "BUILD_SOURCES.txt": vendor_dir / "licenses" / "BUILD_SOURCES.txt",
+    }
+    for package, file_name, target in [
+        ("opentimelineio", "LICENSE.txt", "OpenTimelineIO-LICENSE.txt"),
+        ("opentimelineio", "NOTICE.txt", "OpenTimelineIO-NOTICE.txt"),
+        ("python-mpv", "LICENSE.GPL", "python-mpv-LICENSE.GPL.txt"),
+        ("python-mpv", "LICENSE.LGPL", "python-mpv-LICENSE.LGPL.txt"),
+    ]:
+        dist = distribution(package)
+        found = [f for f in dist.files or [] if f.name == file_name]
+        if not found:
+            raise SystemExit(f"{package}'s {file_name} not found in its installed metadata")
+        sources[target] = Path(dist.locate_file(found[0]))
+    for target, source in sources.items():
+        if not source.is_file():
+            raise SystemExit(f"license file missing: {source} (for {target})")
+        shutil.copyfile(source, folder / target)
+    return folder
+
+
 a = Analysis(
     [str(repo_root / "penultimate_cut" / "app.py")],
     pathex=[str(repo_root)],
     binaries=vendor_binaries,
-    # resources/: the window icon app.py loads at runtime.
-    datas=collect_data_files("opentimelineio") + [(str(resources_dir), "penultimate_cut/resources")],
+    # resources/: the window icon app.py loads at runtime. The package's
+    # own metadata: Help > About reads the version from it.
+    datas=collect_data_files("opentimelineio")
+    + copy_metadata("penultimate-cut")
+    + [(str(resources_dir), "penultimate_cut/resources"), (str(gather_licenses()), "licenses")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    Fetches ffmpeg.exe, ffprobe.exe, and libmpv-2.dll into vendor/.
+    Fetches ffmpeg.exe, ffprobe.exe, and libmpv-2.dll into vendor/, plus
+    vendor/licenses/ (ffmpeg's license notice and which builds these are).
 
 .DESCRIPTION
     Run from anywhere; resolves paths relative to this script's own location,
@@ -53,6 +54,17 @@ try {
     Copy-Item (Join-Path $ffmpegBin.FullName "ffprobe.exe") $vendorDir -Force
     Write-Host "  -> vendor/ffmpeg.exe, vendor/ffprobe.exe"
 
+    # The build's own license notice ships with the app (see
+    # packaging/penultimate_cut.spec's gather_licenses).
+    $licensesDir = Join-Path $vendorDir "licenses"
+    New-Item -ItemType Directory -Force -Path $licensesDir | Out-Null
+    $ffmpegLicense = Join-Path $ffmpegBin.Parent.FullName "LICENSE.txt"
+    if (-not (Test-Path $ffmpegLicense)) {
+        throw "Couldn't find LICENSE.txt in the downloaded ffmpeg build -- its layout may have changed."
+    }
+    Copy-Item $ffmpegLicense (Join-Path $licensesDir "FFmpeg-LICENSE.txt") -Force
+    $ffmpegVersion = (& (Join-Path $vendorDir "ffmpeg.exe") -hide_banner -version | Select-Object -First 1)
+
     Write-Host "Fetching libmpv (shinchiro mpv-winbuild-cmake dev build)..."
     $sevenZip = Find-SevenZip
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest"
@@ -69,6 +81,21 @@ try {
     }
     Copy-Item (Join-Path $mpvExtract "libmpv-2.dll") $vendorDir -Force
     Write-Host "  -> vendor/libmpv-2.dll (from $($mpvAsset.name))"
+
+    # Exactly which builds these are, for the licenses folder: the GPL
+    # points people at the matching source.
+    @(
+        "Builds bundled with this copy of Penultimate Cut",
+        "",
+        "FFmpeg: $ffmpegVersion",
+        "  from https://github.com/BtbN/FFmpeg-Builds/releases (ffmpeg-master-latest-win64-gpl)",
+        "  The 'N-...-g<hash>' part names the FFmpeg source commit: https://github.com/FFmpeg/FFmpeg",
+        "",
+        "libmpv: $($mpvAsset.name)",
+        "  from $($release.html_url)",
+        "  The 'git-<hash>' part names the mpv source commit: https://github.com/mpv-player/mpv"
+    ) | Set-Content -Path (Join-Path $licensesDir "BUILD_SOURCES.txt") -Encoding utf8
+    Write-Host "  -> vendor/licenses/ (FFmpeg-LICENSE.txt, BUILD_SOURCES.txt)"
 }
 finally {
     Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue

@@ -40,6 +40,15 @@ def resources_dir() -> Path:
     return Path(__file__).resolve().parents[1] / "resources"
 
 
+def licenses_dir() -> Path | None:
+    """The installed app's licenses/ folder (license texts and notices for
+    everything bundled, gathered by packaging/penultimate_cut.spec); None
+    when running from source."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "licenses"
+    return None
+
+
 def locate(name: str) -> str:
     """`name` is the base executable name without extension, e.g. "ffmpeg" or "ffprobe"."""
     exe_name = f"{name}.exe" if platform.system() == "Windows" else name

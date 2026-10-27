@@ -62,9 +62,9 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         assert window.timeline is not None
         assert window.clip_properties is not None
         assert len(window.project.tracks) == 1
-        # Only Delete, Shift+Delete, +, - are plain shortcuts; every other
-        # key lives on a menu action, so the menus show it.
-        assert len(window._shortcuts) == 4
+        # Only Delete and Shift+Delete are plain shortcuts; every other key
+        # lives on a menu action, so the menus show it.
+        assert len(window._shortcuts) == 2
         menu_keys = {
             action.text(): action.shortcut().toString()
             for menu_action in window.menuBar().actions()
@@ -122,6 +122,21 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
 
         window.undo_stack.redo()
         assert window.project.tracks[0].items[0].fit_mode == "blurred_background"
+
+        # The panel's sound and fade controls -> undoable SetClipOptionsCommands.
+        window.clip_properties._mute_box.setChecked(True)
+        window.clip_properties._fade_in_box.setChecked(True)
+        assert window.project.tracks[0].items[0].muted
+        assert window.project.tracks[0].items[0].fade_in
+        assert not window.clip_properties._volume_slider.isEnabled()  # greyed while muted
+        window.undo_stack.undo()
+        window.undo_stack.undo()
+        assert not window.project.tracks[0].items[0].muted
+        assert window.clip_properties._volume_slider.isEnabled()
+        window.undo_stack.redo()
+        window.undo_stack.redo()
+        window.undo_stack.undo()
+        window.undo_stack.undo()
 
         # Split button, at the playhead.
         window.timeline.set_playhead(Fraction(2))
