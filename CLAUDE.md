@@ -256,7 +256,9 @@ This plays in every browser, LMS, and media player that matters.
   now an audio-only clip can be dropped there, and export refuses it).
 - Media bin with thumbnails and durations.
 - Timeline: one video track + its linked audio; scroll and zoom; filmstrip thumbnails;
-  audio waveform.
+  audio waveform. Both scale to multi-hour files: filmstrip tiles keep the video's
+  shape (never stretched) and only on-screen tiles are made; the waveform is computed
+  once per media file by ffmpeg (`astats`) and shared by every clip cut from it.
 - Playhead: click/drag to scrub, play/pause, speed up/slow down playback, frame step.
 - **Split at playhead.**
 - Remove segments (ripple and non-ripple).

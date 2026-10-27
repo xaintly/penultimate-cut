@@ -1,5 +1,6 @@
 import time
 from fractions import Fraction
+from pathlib import Path
 
 from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QUndoStack
@@ -13,9 +14,9 @@ from penultimate_cut.ui.timeline.widget import (
     _TRACK_BG,
     TRACK_TOP,
     TimelineWidget,
-    _clip_key,
-    _filmstrip_frame_count,
-    _thumbnail_key,
+    _grid_seconds,
+    _tile_source_time,
+    _tile_width,
 )
 
 
@@ -458,10 +459,9 @@ def test_scrollbar_range_tracks_zoom_and_content_width(qapp, make_video_clip) ->
         widget.shutdown()
 
 
-def test_async_thumbnail_and_waveform_generation(qapp, make_video_clip) -> None:
+def test_async_filmstrip_and_waveform_generation(qapp, make_video_clip) -> None:
     source = make_video_clip("tlw_async.mp4", duration=3.0, fps=30, size="320x240")
     project = make_project(source, duration=3.0)
-    clip = project.tracks[0].items[0]
     stack = QUndoStack()
 
     widget = TimelineWidget()
@@ -470,20 +470,43 @@ def test_async_thumbnail_and_waveform_generation(qapp, make_video_clip) -> None:
         widget.set_project(project, stack)
         widget.show()
         qapp.processEvents()
+        canvas = widget._canvas
 
         # 3s clip at the default 50px/sec zoom renders 150px wide; a 4:3
-        # tile at the 48px filmstrip height is 64px, so 2 tiles fit.
-        frame_count = _filmstrip_frame_count(150, Fraction(4, 3))
-        assert frame_count == 2
-        thumb_key = _thumbnail_key(clip, frame_count)
-        wave_key = _clip_key(clip)
-        assert pump_until(qapp, lambda: thumb_key in widget._canvas._thumbnails)
-        assert pump_until(qapp, lambda: wave_key in widget._canvas._waveforms)
-        assert len(widget._canvas._thumbnails[thumb_key]) == 2
-        assert len(widget._canvas._waveforms[wave_key]) == 100
-        # `job_finished` is its own queued signal, delivered after the
-        # waveform result -- so wait for it rather than checking immediately.
-        assert pump_until(qapp, lambda: thumb_key not in widget._canvas._pending)
+        # tile at the 48px filmstrip height is 64px, so 3 tiles (the last
+        # one cut off) -- each its own frame.
+        assert pump_until(qapp, lambda: len(canvas._frames) == 3 and not canvas._pending_frames)
+        assert all(not pixmap.isNull() for pixmap in canvas._frames.values())
+        assert {key[0] for key in canvas._frames} == {source}
+        assert pump_until(qapp, lambda: canvas._waveforms.get(source) is not None)
+
+        # Splitting reuses the same file's waveform and (mostly) its frames.
+        widget.set_playhead(Fraction(3, 2))
+        widget.split_at_playhead()
+        qapp.processEvents()
+        assert source not in canvas._pending_waveforms
+    finally:
+        widget.shutdown()
+
+
+def test_long_clip_requests_only_the_tiles_on_screen(qapp, make_video_clip) -> None:
+    source = make_video_clip("tlw_long.mp4", duration=2.0, fps=30, size="320x240")
+    # Pretend it's a 2-hour file: only the tiles in view may be requested.
+    media = make_media(source, duration=7200.0)
+    clip = Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(7200))
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip])])
+    stack = QUndoStack()
+
+    widget = TimelineWidget()
+    try:
+        widget.resize(640, 150)
+        widget.set_project(project, stack)
+        widget.show()
+        qapp.processEvents()
+        canvas = widget._canvas
+        on_screen = len(canvas._wanted_frames)
+        assert 0 < on_screen <= canvas.width() // 64 + 1
+        assert len(canvas._pending_frames) + len(canvas._frames) <= on_screen
     finally:
         widget.shutdown()
 
@@ -643,12 +666,27 @@ def test_scrollbar_range_follows_edits(qapp, make_video_clip) -> None:
 def test_filmstrip_tiles_follow_video_shape() -> None:
     # 48px-tall tiles: 16:9 -> ~85px each, 4:3 -> 64px, vertical 9:16 ->
     # 27px; never thinner than the 20px minimum.
-    assert _filmstrip_frame_count(850, Fraction(16, 9)) == 10
-    assert _filmstrip_frame_count(640, Fraction(4, 3)) == 10
-    assert _filmstrip_frame_count(270, Fraction(9, 16)) == 10
-    assert _filmstrip_frame_count(200, Fraction(1, 10)) == 10
-    assert _filmstrip_frame_count(10, Fraction(16, 9)) == 1
-    assert _filmstrip_frame_count(10**6, Fraction(16, 9)) == 80
+    assert _tile_width(Fraction(4, 3)) == 64
+    assert round(_tile_width(Fraction(16, 9))) == 85
+    assert _tile_width(Fraction(9, 16)) == 27
+    assert _tile_width(Fraction(1, 10)) == 20
+
+
+def test_tile_grid_is_a_power_of_two_no_longer_than_a_tile() -> None:
+    assert _grid_seconds(Fraction(32)) == 32  # 64px at 2px/s
+    assert _grid_seconds(Fraction(64, 82)) == Fraction(1, 2)  # 64px at 82px/s
+    assert _grid_seconds(Fraction(16, 125)) == Fraction(1, 8)  # 64px at 500px/s
+    assert _grid_seconds(Fraction(1, 1000)) == Fraction(1, 16)  # floor
+
+
+def test_tile_times_snap_to_the_grid_within_the_clip() -> None:
+    media = make_media(Path("unused.mp4"), duration=100.0)
+    clip = Clip(media_ref=media, source_in=Fraction(10), source_out=Fraction(20))
+
+    assert _tile_source_time(clip, Fraction(3), Fraction(2)) == 12  # 13 -> nearest even
+    assert _tile_source_time(clip, Fraction(0), Fraction(8)) == 10  # 8 is before the clip
+    # past the end: the clip's last frame
+    assert _tile_source_time(clip, Fraction(10), Fraction(1)) == Fraction(20) - Fraction(1, 30)
 
 
 def test_right_drag_scrolls_and_right_click_opens_menu(qapp, make_video_clip, monkeypatch) -> None:

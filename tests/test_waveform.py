@@ -1,12 +1,18 @@
 import subprocess
-from fractions import Fraction
+from array import array
 from pathlib import Path
 
 import pytest
 
 from penultimate_cut.media.cache import cache_dir_for
-from penultimate_cut.media.probe import probe
-from penultimate_cut.media.waveform import WaveformError, peaks
+from penultimate_cut.media.waveform import (
+    PEAKS_PER_SECOND,
+    Waveform,
+    WaveformCancelled,
+    WaveformError,
+    media_waveform,
+    peak_between,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -14,46 +20,40 @@ def isolated_cache_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("PENULTIMATE_CUT_CACHE_DIR", str(tmp_path / "cache_root"))
 
 
-def test_peaks_returns_requested_count_within_range(make_video_clip) -> None:
+def test_waveform_covers_the_whole_file_at_a_fixed_rate(make_video_clip) -> None:
     path = make_video_clip("waveform_basic.mp4", duration=2.0, fps=30, size="320x240")
-    info = probe(path)
 
-    result = peaks(path, info.duration, count=20)
+    waveform = media_waveform(path)
 
-    assert len(result) == 20
-    for lo, hi in result:
+    # 2 s of audio; AAC padding can add a peak or two at the end.
+    assert abs(len(waveform) - 2 * PEAKS_PER_SECOND) <= 3
+    for lo, hi in zip(waveform.lows, waveform.highs, strict=True):
         assert -1.0 <= lo <= hi <= 1.0
 
 
-def test_peaks_detects_signal_on_a_sine_tone(make_audio_clip) -> None:
-    # A sine wave should produce real (non-silent) peaks somewhere in the clip.
+def test_waveform_detects_signal_on_a_sine_tone(make_audio_clip) -> None:
     path = make_audio_clip("waveform_tone.m4a", duration=2.0)
-    info = probe(path)
 
-    result = peaks(path, info.duration, count=10)
+    lo, hi = peak_between(media_waveform(path), 0.5, 1.5)
 
-    assert any(hi - lo > 0.01 for lo, hi in result)
+    assert hi - lo > 0.01
 
 
-def test_peaks_does_not_regenerate_cached_result(make_video_clip) -> None:
+def test_waveform_is_cached_on_disk(make_video_clip) -> None:
     path = make_video_clip("waveform_cache.mp4", duration=2.0, fps=30, size="320x240")
-    info = probe(path)
-
-    peaks(path, info.duration, count=8)
-    duration_us = int(info.duration * 1_000_000)
-    cache_file = cache_dir_for(path) / f"peaks_8_8000sr_s0_d{duration_us}.bin"
+    media_waveform(path)
+    cache_file = cache_dir_for(path) / f"waveform_{PEAKS_PER_SECOND}ps.bin"
     assert cache_file.exists()
-    sentinel = b"\x00" * cache_file.stat().st_size
-    cache_file.write_bytes(sentinel)
+    cache_file.write_bytes(array("f", [0.0] * 8).tobytes())  # 4 silent peaks
 
-    second = peaks(path, info.duration, count=8)
+    again = media_waveform(path)
 
-    assert second == [(0.0, 0.0)] * 8
+    assert len(again) == 4
+    assert max(again.highs) == 0.0
 
 
-def test_peaks_start_offset_samples_the_right_window(tmp_path: Path) -> None:
-    # Silence for the first second, a real tone for the second -- peaks()
-    # with start=1 should see the tone, not the leading silence.
+def test_peak_between_reads_the_right_window(tmp_path: Path) -> None:
+    # Silence for the first second, a real tone for the second.
     path = tmp_path / "half_silent.m4a"
     subprocess.run(
         [
@@ -77,24 +77,45 @@ def test_peaks_start_offset_samples_the_right_window(tmp_path: Path) -> None:
         ],
         check=True,
     )
+    waveform = media_waveform(path)
 
-    silent_window = peaks(path, Fraction(1), count=5, start=Fraction(0))
-    tone_window = peaks(path, Fraction(1), count=5, start=Fraction(1))
+    silent_lo, silent_hi = peak_between(waveform, 0.1, 0.9)
+    tone_lo, tone_hi = peak_between(waveform, 1.1, 1.9)
 
-    assert all(hi - lo < 0.01 for lo, hi in silent_window)
-    assert any(hi - lo > 0.1 for lo, hi in tone_window)
+    assert silent_hi - silent_lo < 0.01
+    assert tone_hi - tone_lo > 0.1
 
 
-def test_peaks_raises_when_media_has_no_audio(make_silent_video_clip) -> None:
+def test_peak_between_handles_tiny_and_out_of_range_spans() -> None:
+    waveform = Waveform(array("f", [-0.5, -0.25]), array("f", [0.5, 0.25]), peaks_per_second=1)
+
+    assert peak_between(waveform, 0.0, 0.001) == (-0.5, 0.5)  # less than one peak
+    assert peak_between(waveform, 0.0, 2.0) == (-0.5, 0.5)
+    assert peak_between(waveform, 1.5, 1.6) == (-0.25, 0.25)
+    assert peak_between(waveform, 5.0, 6.0) == (0.0, 0.0)
+
+
+def test_waveform_raises_when_media_has_no_audio(make_silent_video_clip) -> None:
     path = make_silent_video_clip("waveform_silent.mp4", duration=1.0, size="320x240")
-    info = probe(path)
 
     with pytest.raises(WaveformError):
-        peaks(path, info.duration, count=10)
+        media_waveform(path)
 
 
-def test_peaks_rejects_non_positive_count(make_audio_clip) -> None:
-    path = make_audio_clip("waveform_badcount.m4a", duration=1.0)
-    info = probe(path)
-    with pytest.raises(ValueError):
-        peaks(path, info.duration, count=0)
+def test_cancelled_waveform_is_not_cached(make_audio_clip) -> None:
+    path = make_audio_clip("waveform_cancel.m4a", duration=2.0)
+
+    with pytest.raises(WaveformCancelled):
+        media_waveform(path, cancel_check=lambda: True)
+
+    assert not (cache_dir_for(path) / f"waveform_{PEAKS_PER_SECOND}ps.bin").exists()
+
+
+def test_peak_between_long_spans_use_the_coarse_copy_without_losing_peaks() -> None:
+    lows = array("f", [0.0] * 1000)
+    highs = array("f", [0.0] * 1000)
+    highs[517] = 0.75  # one loud peak in the middle of a long span
+    waveform = Waveform(lows, highs, peaks_per_second=10)
+
+    assert peak_between(waveform, 40.0, 60.0) == (0.0, 0.75)
+    assert peak_between(waveform, 0.0, 40.0) == (0.0, 0.0)

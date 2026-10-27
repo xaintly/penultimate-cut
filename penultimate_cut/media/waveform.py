@@ -1,22 +1,37 @@
-"""Audio waveform peaks, cached on disk.
+"""Audio waveform peaks, one pass per media file, cached on disk.
 
-ffmpeg decodes and resamples the audio track to a fixed, modest sample rate
-(exact pitch/frequency content doesn't matter for a visual waveform, and
-resampling first keeps memory bounded for long clips) before peaks are
-computed in Python.
+A file's whole audio track is reduced to a fixed number of (min, max) peak
+pairs per second of audio, once. Every timeline clip cut from that file then
+just reads its own slice (`peak_between`) -- so splitting or trimming a clip
+never decodes anything again.
+
+ffmpeg computes the peaks itself (`astats`, reset every bucket) and streams
+them out as text, so memory stays small whatever the file's length. The
+first version decoded raw samples into Python and took min/max there: about
+85 s and 240 MB for a 2-hour file, nearly all of it Python looping over 57
+million samples. This way the same file takes about 9 s.
 """
 
 from __future__ import annotations
 
 import subprocess
 from array import array
-from fractions import Fraction
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from penultimate_cut.media.cache import cache_dir_for
 from penultimate_cut.media.executables import ExecutableNotFoundError, locate
 
-DEFAULT_SAMPLE_RATE = 8000
+PEAKS_PER_SECOND = 50
+"""Detail of the stored waveform: one pixel per peak at the timeline's
+default zoom (50 px/s)."""
+_SAMPLE_RATE = 8000
+_SAMPLES_PER_PEAK = _SAMPLE_RATE // PEAKS_PER_SECOND
+_FULL_SCALE = 32768.0
+_MIN_KEY = "lavfi.astats.Overall.Min_level="
+_MAX_KEY = "lavfi.astats.Overall.Max_level="
+
 Peak = tuple[float, float]
 """A (min, max) pair, each normalized to [-1.0, 1.0]."""
 
@@ -25,89 +40,127 @@ class WaveformError(RuntimeError):
     """ffmpeg couldn't decode audio from this file (or it has no audio track)."""
 
 
-def peaks(
-    media_path: Path,
-    duration: Fraction,
-    count: int,
-    *,
-    start: Fraction = Fraction(0),
-    sample_rate: int = DEFAULT_SAMPLE_RATE,
-) -> list[Peak]:
-    """Return `count` (min, max) peak pairs spanning `[start, start+duration)`
-    of the audio track, cached on disk.
+class WaveformCancelled(Exception):
+    """`cancel_check` asked to stop before the waveform was finished."""
 
-    `start` defaults to 0 (the whole file); a trimmed timeline clip passes
-    its own `source_in` so the waveform reflects what the clip actually
-    plays, not the start of the source file. Seeking to `start` uses
-    ffmpeg's fast (keyframe-approximate) seek, not the frame-exact kind --
-    fine here, since this is a visual approximation, never exported content.
+
+_COARSE_FACTOR = 16
+
+
+@dataclass
+class Waveform:
+    """`lows[i]`/`highs[i]` are the peaks of the i-th 1/`peaks_per_second`
+    slice of the file's audio.
+
+    Also keeps a copy `_COARSE_FACTOR` times coarser, for spans covering
+    many peaks: zoomed all the way out, each pixel of a long clip covers
+    dozens of peaks, and reading them all made each repaint over 10x slower.
     """
-    if count < 1:
-        raise ValueError("count must be at least 1")
 
-    cache_dir = cache_dir_for(media_path)
-    start_us = int(start * 1_000_000)
-    duration_us = int(duration * 1_000_000)
-    cache_path = cache_dir / f"peaks_{count}_{sample_rate}sr_s{start_us}_d{duration_us}.bin"
+    lows: array
+    highs: array
+    peaks_per_second: int = PEAKS_PER_SECOND
+    _coarse: tuple[array, array] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        coarse_lows, coarse_highs = array("f"), array("f")
+        for first in range(0, len(self.lows), _COARSE_FACTOR):
+            coarse_lows.append(min(self.lows[first : first + _COARSE_FACTOR]))
+            coarse_highs.append(max(self.highs[first : first + _COARSE_FACTOR]))
+        self._coarse = (coarse_lows, coarse_highs)
+
+    def __len__(self) -> int:
+        return len(self.lows)
+
+
+def media_waveform(media_path: Path, *, cancel_check: Callable[[], bool] | None = None) -> Waveform:
+    """The waveform of `media_path`'s whole audio track, from the disk cache
+    if it's there. Raises `WaveformCancelled` if `cancel_check()` turns true
+    partway (ffmpeg is stopped and nothing is cached)."""
+    cache_path = cache_dir_for(media_path) / f"waveform_{PEAKS_PER_SECOND}ps.bin"
     if cache_path.exists():
-        return _read_cache(cache_path, count)
-
-    samples = _decode_pcm(media_path, sample_rate, start, duration)
-    result = _bucket_peaks(samples, count)
-    _write_cache(cache_path, result)
-    return result
+        return _read_cache(cache_path)
+    waveform = _compute(media_path, cancel_check or (lambda: False))
+    _write_cache(cache_path, waveform)
+    return waveform
 
 
-def _bucket_peaks(samples: array, count: int) -> list[Peak]:
-    total = len(samples)
-    if total == 0:
-        return [(0.0, 0.0)] * count
-
-    bucket_size = total / count
-    result: list[Peak] = []
-    for index in range(count):
-        start = int(index * bucket_size)
-        end = max(start + 1, int((index + 1) * bucket_size))
-        chunk = samples[start:end]
-        if not chunk:
-            result.append((0.0, 0.0))
-            continue
-        result.append((min(chunk) / 32768.0, max(chunk) / 32768.0))
-    return result
+def peak_between(waveform: Waveform, start: float, end: float) -> Peak:
+    """The (min, max) over source seconds `[start, end)` -- at least one
+    peak's worth, so a span shorter than one peak still shows that peak.
+    (0, 0) outside the audio."""
+    rate: float = waveform.peaks_per_second
+    lows, highs = waveform.lows, waveform.highs
+    if (end - start) * rate >= 2 * _COARSE_FACTOR:
+        lows, highs = waveform._coarse
+        rate /= _COARSE_FACTOR
+    first = max(0, int(start * rate))
+    last = min(len(lows), max(first + 1, int(end * rate)))
+    if first >= last:
+        return (0.0, 0.0)
+    return (min(lows[first:last]), max(highs[first:last]))
 
 
-def _decode_pcm(media_path: Path, sample_rate: int, start: Fraction, duration: Fraction) -> array:
+def _compute(media_path: Path, cancel_check: Callable[[], bool]) -> Waveform:
     try:
         ffmpeg = locate("ffmpeg")
     except ExecutableNotFoundError as exc:
         raise WaveformError(str(exc)) from exc
 
-    args = [ffmpeg, "-hide_banner", "-loglevel", "error"]
-    if start > 0:
-        args += ["-ss", str(float(start))]
-    args += ["-i", str(media_path), "-t", str(float(duration))]
-    args += ["-vn", "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "-"]
+    audio_filter = ",".join(
+        [
+            f"aresample={_SAMPLE_RATE}",
+            "aformat=sample_fmts=s16:channel_layouts=mono",
+            f"asetnsamples=n={_SAMPLES_PER_PEAK}",
+            "astats=metadata=1:reset=1:measure_overall=Min_level+Max_level:measure_perchannel=none",
+            "ametadata=mode=print:file=-",
+        ]
+    )
+    args = [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(media_path)]
+    args += ["-vn", "-map", "0:a:0", "-af", audio_filter, "-f", "null", "-"]
 
+    lows = array("f")
+    highs = array("f")
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
     try:
-        result = subprocess.run(args, check=True, capture_output=True)
-    except subprocess.CalledProcessError as exc:
-        stderr = exc.stderr.decode(errors="replace").strip()
-        raise WaveformError(f"{media_path}: ffmpeg failed: {stderr}") from exc
+        assert process.stdout is not None
+        for count, line in enumerate(process.stdout):
+            if line.startswith(_MIN_KEY):
+                lows.append(float(line[len(_MIN_KEY) :]) / _FULL_SCALE)
+            elif line.startswith(_MAX_KEY):
+                highs.append(float(line[len(_MAX_KEY) :]) / _FULL_SCALE)
+            if count % 3000 == 0 and cancel_check():
+                raise WaveformCancelled()
+        stderr = process.stderr.read() if process.stderr else ""
+        if process.wait() != 0:
+            raise WaveformError(f"{media_path}: ffmpeg failed: {stderr.strip()}")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    if not lows or len(lows) != len(highs):
+        raise WaveformError(f"{media_path}: no audio to draw")
+    return Waveform(lows, highs)
 
-    samples = array("h")
-    samples.frombytes(result.stdout)
-    return samples
 
-
-def _write_cache(cache_path: Path, result: list[Peak]) -> None:
+def _write_cache(cache_path: Path, waveform: Waveform) -> None:
     flat = array("f")
-    for lo, hi in result:
+    for lo, hi in zip(waveform.lows, waveform.highs, strict=True):
         flat.append(lo)
         flat.append(hi)
-    cache_path.write_bytes(flat.tobytes())
+    # Write-then-rename, so an interrupted write never leaves a short file
+    # that a later run would read as the whole waveform.
+    partial = cache_path.with_suffix(".partial")
+    partial.write_bytes(flat.tobytes())
+    partial.replace(cache_path)
 
 
-def _read_cache(cache_path: Path, count: int) -> list[Peak]:
+def _read_cache(cache_path: Path) -> Waveform:
     flat = array("f")
     flat.frombytes(cache_path.read_bytes())
-    return [(flat[2 * i], flat[2 * i + 1]) for i in range(count)]
+    return Waveform(array("f", flat[0::2]), array("f", flat[1::2]))
