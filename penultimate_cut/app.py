@@ -14,9 +14,8 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
-from pathlib import Path
 
-from penultimate_cut.media.executables import vendor_dir
+from penultimate_cut.media.executables import resources_dir, vendor_dir
 
 os.environ["PATH"] = str(vendor_dir()) + os.pathsep + os.environ.get("PATH", "")
 
@@ -25,7 +24,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from penultimate_cut.ui.main_window import MainWindow  # noqa: E402
 
-ICON_PATH = Path(__file__).resolve().parent / "resources" / "icon.ico"
+ICON_PATH = resources_dir() / "icon.ico"
 """Built from icon.png by scripts/make_icon.py."""
 _APP_USER_MODEL_ID = "PenultimateCut.PenultimateCut"
 

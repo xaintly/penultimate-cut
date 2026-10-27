@@ -30,6 +30,16 @@ def vendor_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "vendor"
 
 
+def resources_dir() -> Path:
+    """penultimate_cut/resources/ (the app icon): copied beside the frozen
+    .exe by packaging/penultimate_cut.spec. Not found via `__file__` in the
+    frozen app: PyInstaller places the entry script (app.py) beside the
+    .exe, outside its package folder."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "penultimate_cut" / "resources"
+    return Path(__file__).resolve().parents[1] / "resources"
+
+
 def locate(name: str) -> str:
     """`name` is the base executable name without extension, e.g. "ffmpeg" or "ffprobe"."""
     exe_name = f"{name}.exe" if platform.system() == "Windows" else name
