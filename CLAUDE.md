@@ -212,7 +212,10 @@ removes media: silently if no clip uses it, otherwise after a confirmation (its 
 may be off-screen), as one undoable edit. Right-click a clip → **Delete clip**, or
 **Edit → Delete Clip** for the clip under the playhead (greyed out when there's none);
 both leave empty space, like Delete. **Delete and close gap** (right-click, Edit menu)
-is the same with later clips moving up, like Shift+Delete.
+is the same with later clips moving up, like Shift+Delete. Hovering over a clip shows a
+tooltip: its file name, which part of the original it uses, and its length (for empty
+space: what it is and how to remove it). The timeline area is only as tall as its one
+track needs; the preview gets the rest.
 
 ---
 

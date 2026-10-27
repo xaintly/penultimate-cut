@@ -40,11 +40,12 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Literal
 
-from PySide6.QtCore import QObject, QPoint, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QDragEnterEvent,
     QDropEvent,
+    QHelpEvent,
     QMouseEvent,
     QPainter,
     QPaintEvent,
@@ -53,7 +54,7 @@ from PySide6.QtGui import (
     QUndoStack,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QMenu, QScrollBar, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QMenu, QScrollBar, QSizePolicy, QToolTip, QVBoxLayout, QWidget
 
 from penultimate_cut.commands.timeline_commands import (
     DeleteCommand,
@@ -74,6 +75,7 @@ from penultimate_cut.media.waveform import (
 from penultimate_cut.model.project import Clip, Gap, MediaRef, Project, Track, TrackItem
 from penultimate_cut.model.time import fraction_from_seconds, snap_to_frame
 from penultimate_cut.model.timeline_ops import TimelineOpError, move_item, trim_item
+from penultimate_cut.ui.format import format_duration
 from penultimate_cut.ui.media_bin import MEDIA_MIME_TYPE
 from penultimate_cut.ui.timeline.geometry import TimelineView, hit_test, item_x_range
 
@@ -807,6 +809,21 @@ class _TimelineCanvas(QWidget):
         self._undo_stack.push(RemoveGapsCommand(self._project, self._track_index))
         self._select(None)
 
+    # --- hover ------------------------------------------------------------------------
+
+    def event(self, event: QEvent) -> bool:
+        """Hovering over a clip shows where it came from: its name is drawn
+        on the clip, but can be scrolled off-screen or cut short."""
+        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
+            track = self.track
+            hit = hit_test(track, self._view, event.pos().x()) if track else None
+            if track is not None and hit is not None and self._drag is None:
+                QToolTip.showText(event.globalPos(), item_tooltip(track.items[hit.index]), self)
+            else:
+                QToolTip.hideText()
+            return True
+        return super().event(event)
+
     # --- drag and drop, media bin -> timeline ---------------------------------------
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
@@ -838,6 +855,27 @@ class _TimelineCanvas(QWidget):
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self.content_changed.emit()
+
+
+def item_tooltip(item: TrackItem) -> str:
+    if isinstance(item, Gap):
+        return (
+            f"Empty space ({_length(item.duration)}): plays as black and silence.\n"
+            "Right-click to delete it."
+        )
+    lines = [item.media_ref.path.name]
+    if not item.media_ref.is_still_image:
+        start, end = format_duration(item.source_in), format_duration(item.source_out)
+        lines.append(f"Uses {start}–{end} of the original")
+    lines.append(f"Length {_length(item.duration)}")
+    return "\n".join(lines)
+
+
+def _length(duration: Fraction) -> str:
+    """Seconds with a decimal for short spans, where 00:02 would hide 2.5 s."""
+    if duration < 60:
+        return f"{float(duration):.1f} s"
+    return format_duration(duration)
 
 
 def _pixmap_bytes(pixmap: QPixmap) -> int:

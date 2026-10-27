@@ -17,6 +17,7 @@ from penultimate_cut.ui.timeline.widget import (
     _grid_seconds,
     _tile_source_time,
     _tile_width,
+    item_tooltip,
 )
 
 
@@ -862,5 +863,64 @@ def test_delete_clip_at_playhead(qapp, make_video_clip) -> None:
         remaining = project.tracks[0].items
         assert [type(item) for item in remaining] == [Gap, Clip]  # only the old gap is left
         assert remaining[0].duration == 2 and remaining[1] is clip_b
+    finally:
+        widget.shutdown()
+
+
+def test_hover_tooltip_says_where_a_clip_came_from(qapp, make_video_clip, monkeypatch) -> None:
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QHelpEvent
+
+    from penultimate_cut.ui.timeline import widget as widget_module
+
+    source = make_video_clip("tlw_tooltip.mp4", duration=10.0, fps=30, size="320x240")
+    clip = Clip(media_ref=make_media(source), source_in=Fraction(12), source_out=Fraction(45, 2))
+    still = MediaRef(
+        path=Path("photo.jpg"),
+        relative_path=None,
+        duration=Fraction(86400),
+        frame_rate=None,
+        has_video=True,
+        has_audio=False,
+        width=800,
+        height=600,
+    )
+    assert item_tooltip(clip) == (
+        "tlw_tooltip.mp4\nUses 00:12–00:22 of the original\nLength 10.5 s"
+    )
+    assert item_tooltip(Clip(media_ref=still, source_in=Fraction(0), source_out=Fraction(5))) == (
+        "photo.jpg\nLength 5.0 s"
+    )
+    assert item_tooltip(Gap(duration=Fraction(90))).startswith("Empty space (01:30)")
+
+    # Qt only really shows a tooltip under the actual mouse pointer, so
+    # record what the timeline asks for instead.
+    shown: list[str | None] = []
+
+    class FakeToolTip:
+        @staticmethod
+        def showText(_pos, text, _widget) -> None:
+            shown.append(text)
+
+        @staticmethod
+        def hideText() -> None:
+            shown.append(None)
+
+    monkeypatch.setattr(widget_module, "QToolTip", FakeToolTip)
+
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip])])
+    widget = TimelineWidget()
+    try:
+        widget.resize(800, 150)
+        widget.set_project(project, QUndoStack())
+        canvas = widget._canvas
+
+        def hover(x: int) -> None:
+            pos = QPoint(x, TRACK_TOP + 20)
+            canvas.event(QHelpEvent(QEvent.Type.ToolTip, pos, canvas.mapToGlobal(pos)))
+
+        hover(100)
+        hover(700)  # past the end of the timeline
+        assert shown == [item_tooltip(clip), None]
     finally:
         widget.shutdown()
