@@ -17,7 +17,18 @@ import contextlib
 from fractions import Fraction
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QProxyStyle,
+    QPushButton,
+    QSlider,
+    QStyle,
+    QStyleHintReturn,
+    QStyleOption,
+    QVBoxLayout,
+    QWidget,
+)
 
 from penultimate_cut.model.project import Project
 from penultimate_cut.preview.edl import to_edl
@@ -32,6 +43,23 @@ PLAYBACK_SPEEDS: tuple[Fraction, ...] = tuple(
 _SLIDER_RESOLUTION = 1000
 """Seek slider steps per second of timeline -- fine enough for smooth scrubbing
 without needing frame-accurate slider positions (the frame grid is much finer)."""
+
+
+class _ClickToJumpStyle(QProxyStyle):
+    """A left click anywhere on a slider's line jumps straight there (and
+    keeps dragging from there), instead of Qt's default of stepping toward
+    the pointer a page at a time."""
+
+    def styleHint(
+        self,
+        hint: QStyle.StyleHint,
+        option: QStyleOption | None = None,
+        widget: QWidget | None = None,
+        returnData: QStyleHintReturn | None = None,
+    ) -> int:
+        if hint == QStyle.StyleHint.SH_Slider_AbsoluteSetButtons:
+            return Qt.MouseButton.LeftButton.value
+        return super().styleHint(hint, option, widget, returnData)
 
 
 class PreviewWidget(QWidget):
@@ -74,6 +102,11 @@ class PreviewWidget(QWidget):
         self._volume_slider.setFixedWidth(90)
         self._volume_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # keep ←/→ for frame stepping
         self._volume_slider.setToolTip("Preview volume (doesn't change the exported video)")
+
+        self._slider_style = _ClickToJumpStyle()
+        self._slider_style.setParent(self)  # a widget's style isn't owned by the widget
+        self._slider.setStyle(self._slider_style)
+        self._volume_slider.setStyle(self._slider_style)
 
         transport = QHBoxLayout()
         transport.addWidget(self._back_button)
@@ -221,7 +254,9 @@ class PreviewWidget(QWidget):
     # --- internal: slider <-> player position sync -------------------------------
 
     def _on_slider_pressed(self) -> None:
+        # The press has already moved the slider to the clicked spot.
         self._dragging = True
+        self._player.seek(_slider_value_to_seconds(self._slider.value()))
 
     def _on_slider_released(self) -> None:
         self._dragging = False

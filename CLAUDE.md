@@ -259,6 +259,7 @@ This plays in every browser, LMS, and media player that matters.
   audio waveform. Both scale to multi-hour files: filmstrip tiles keep the video's
   shape (never stretched) and only on-screen tiles are made; the waveform is computed
   once per media file by ffmpeg (`astats`) and shared by every clip cut from it.
+- Preview sliders (position, volume): a click anywhere on the line jumps there.
 - Playhead: click/drag to scrub, play/pause, speed up/slow down playback, frame step.
 - **Split at playhead.**
 - Remove segments (ripple and non-ripple).

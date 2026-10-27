@@ -217,3 +217,38 @@ def test_volume_slider_sets_player_volume_and_reports_changes(widget) -> None:
     finally:
         widget.volume_changed.disconnect(reported.append)
         widget.set_volume(100)
+
+
+def test_clicking_a_slider_line_jumps_straight_there(qapp, widget, make_video_clip) -> None:
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    source = make_video_clip("pw_click.mp4", duration=4.0, fps=30, size="320x240")
+    widget.load_project(make_project(source, duration=4.0))
+    assert widget.player.wait_until_ready(timeout=8)
+    pump(qapp, 0.5)  # slider range from the real duration
+    widget.pause()
+
+    try:
+        # One click at 3/4 of the volume line: straight to ~75, not a page step.
+        volume = widget._volume_slider
+        QTest.mouseClick(
+            volume,
+            Qt.MouseButton.LeftButton,
+            pos=QPoint(volume.width() * 3 // 4, volume.height() // 2),
+        )
+        assert 65 <= widget.player.volume <= 85
+
+        # One click at 3/4 of the position line: the player seeks to ~3s.
+        slider = widget._slider
+        QTest.mouseClick(
+            slider,
+            Qt.MouseButton.LeftButton,
+            pos=QPoint(slider.width() * 3 // 4, slider.height() // 2),
+        )
+        pump(qapp, 0.3)
+        position = widget.player.position
+        assert position is not None and 2.5 <= position <= 3.5
+        assert widget._dragging is False
+    finally:
+        widget.set_volume(100)
