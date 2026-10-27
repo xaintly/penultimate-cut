@@ -65,7 +65,9 @@ def test_cancel_terminates_ffmpeg_and_deletes_partial_file(tmp_path: Path) -> No
 def test_cancel_after_some_progress(tmp_path: Path) -> None:
     output_path = tmp_path / "out.mp4"
     args = [
-        *lavfi_args(30.0),
+        # Long enough that a fast machine can't finish before the second
+        # progress report; it's cancelled right then, so it costs no time.
+        *lavfi_args(600.0),
         *encoder_args("libx264", "small_file", 320, 240, Fraction(30)),
     ]
     calls = {"n": 0}
