@@ -38,6 +38,7 @@ from PyInstaller.utils.hooks import collect_data_files
 # injected equivalent for exactly this purpose.
 repo_root = Path(SPECPATH).resolve().parent  # noqa: F821
 vendor_dir = repo_root / "vendor"
+resources_dir = repo_root / "penultimate_cut" / "resources"
 
 vendor_binaries = [
     (str(vendor_dir / name), "vendor") for name in ("ffmpeg.exe", "ffprobe.exe", "libmpv-2.dll")
@@ -47,7 +48,8 @@ a = Analysis(
     [str(repo_root / "penultimate_cut" / "app.py")],
     pathex=[str(repo_root)],
     binaries=vendor_binaries,
-    datas=collect_data_files("opentimelineio"),
+    # resources/: the window icon app.py loads at runtime.
+    datas=collect_data_files("opentimelineio") + [(str(resources_dir), "penultimate_cut/resources")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -68,6 +70,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    icon=str(resources_dir / "icon.ico"),
     disable_windowed_traceback=False,
     contents_directory=".",
 )

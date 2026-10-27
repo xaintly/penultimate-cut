@@ -24,6 +24,7 @@ AppPublisher=Penultimate Cut
 DefaultDirName={autopf}\PenultimateCut
 DefaultGroupName=Penultimate Cut
 UninstallDisplayIcon={app}\PenultimateCut.exe
+SetupIconFile=..\penultimate_cut\resources\icon.ico
 OutputDir=dist
 OutputBaseFilename=PenultimateCutSetup-{#AppVersion}
 Compression=lzma2

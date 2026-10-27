@@ -11,21 +11,36 @@ where shared libraries are found via ldconfig, not PATH.
 
 from __future__ import annotations
 
+import ctypes
 import os
 import sys
+from pathlib import Path
 
 from penultimate_cut.media.executables import vendor_dir
 
 os.environ["PATH"] = str(vendor_dir()) + os.pathsep + os.environ.get("PATH", "")
 
+from PySide6.QtGui import QIcon  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from penultimate_cut.ui.main_window import MainWindow  # noqa: E402
 
+ICON_PATH = Path(__file__).resolve().parent / "resources" / "icon.ico"
+"""Built from icon.png by scripts/make_icon.py."""
+_APP_USER_MODEL_ID = "PenultimateCut.PenultimateCut"
+
 
 def main() -> int:
+    if sys.platform == "win32" and not getattr(sys, "frozen", False):
+        # Without its own ID, a run from source is grouped on the taskbar
+        # under python.exe and shows Python's icon instead of ours. Not in
+        # the installed app: there the .exe is already its own taskbar
+        # entry, and an ID its Start-menu shortcut lacks would split a
+        # pinned icon from the running window.
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(_APP_USER_MODEL_ID)
     app = QApplication(sys.argv)
     app.setApplicationName("Penultimate Cut")
+    app.setWindowIcon(QIcon(str(ICON_PATH)))
     window = MainWindow()
     window.show()
     return app.exec()
