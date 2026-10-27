@@ -13,6 +13,8 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write  # to create the GitHub Release on a version tag
     steps:
       - uses: actions/checkout@v4
 
@@ -65,3 +67,14 @@ jobs:
         with:
           name: PenultimateCut-Setup-${{ steps.version.outputs.value }}
           path: packaging/dist/PenultimateCutSetup-*.exe
+
+      # A version tag also publishes a GitHub Release with the installer
+      # attached: the public download page (artifacts above need a GitHub
+      # login and expire). A manual run only produces the artifact.
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Penultimate Cut ${{ steps.version.outputs.value }}
+          files: packaging/dist/PenultimateCutSetup-*.exe
+          generate_release_notes: true

@@ -1,6 +1,6 @@
 [project]
 name = "penultimate_cut"
-version = "0.2.2"
+version = "0.75"
 description = "Penultimate Cut — a simple video editor for Windows. Not the final cut. Just the one you turn in."
 requires-python = ">=3.12"
 license = "GPL-3.0-or-later"
