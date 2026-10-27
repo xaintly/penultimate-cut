@@ -39,7 +39,15 @@ def test_file_menu_has_expected_actions(qapp) -> None:
             if action.menu() is not None and action.menu().title() == "&File"
         )
         labels = [action.text() for action in file_menu.actions() if action.text()]
-        assert labels == ["New", "Open…", "Save", "Save As…", "Export Video…", "Exit"]
+        assert labels == [
+            "New",
+            "Open…",
+            "Import Media…",
+            "Save",
+            "Save As…",
+            "Export Video…",
+            "Exit",
+        ]
     finally:
         window.undo_stack.setClean()
         window.close()

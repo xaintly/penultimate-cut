@@ -164,6 +164,19 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         assert window.project.tracks[0].items == []
         window.undo_stack.undo()
         assert len(window.project.tracks[0].items) == 1
+        # Edit > Delete and Close Gap: the same, greyed out the same way.
+        assert window._close_gap_action.isEnabled()
+        window._close_gap_action.trigger()
+        assert window.project.tracks[0].items == []
+        window.undo_stack.undo()
+
+        file_actions = {
+            action.text(): action
+            for menu_action in window.menuBar().actions()
+            if menu_action.text() == "&File"
+            for action in menu_action.menu().actions()
+        }
+        assert file_actions["Import Media…"].shortcut().toString() == "Ctrl+I"
 
         # Play menu jumps move the playhead, clamped to the timeline.
         play_actions = {

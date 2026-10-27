@@ -57,11 +57,12 @@ from collections.abc import Callable
 from fractions import Fraction
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
     QCloseEvent,
+    QIcon,
     QKeySequence,
     QShortcut,
     QUndoCommand,
@@ -140,34 +141,51 @@ class MainWindow(QMainWindow):
         top_split.setStretchFactor(1, 3)
         top_split.setStretchFactor(2, 1)
 
+        # The edit buttons sit in a slim bar on top of the timeline they act on.
+        Icon = QIcon.ThemeIcon
+        self._import_button = _toolbar_button(Icon.DocumentOpen, "Import", "Import media (Ctrl+I)")
+        self._split_button = _toolbar_button(Icon.EditCut, "Split", "Split at the playhead (S)")
+        self._delete_button = _toolbar_button(
+            Icon.EditDelete,
+            "Delete",
+            "Delete the selected clip, leaving empty space (Delete).\n"
+            "Shift+Delete also closes the gap.",
+        )
+        self._add_title_button = _toolbar_button(Icon.InsertText, "Add Title", "Add a title")
+        self._add_title_button.hide()  # titles are Phase 2; nothing to do yet
+        self._export_button = _toolbar_button(
+            Icon.DocumentSaveAs, "Export", "Make the finished video file (Ctrl+E)"
+        )
+        self._import_button.clicked.connect(self.media_bin.choose_files)
+        self._split_button.clicked.connect(self.timeline.split_at_playhead)
+        self._delete_button.clicked.connect(lambda: self.timeline.delete_selected(ripple=False))
+        self._export_button.clicked.connect(self._open_export_dialog)
+
+        button_bar = QHBoxLayout()
+        button_bar.setContentsMargins(0, 0, 0, 2)
+        button_bar.addWidget(self._import_button)
+        button_bar.addWidget(self._split_button)
+        button_bar.addWidget(self._delete_button)
+        button_bar.addWidget(self._add_title_button)
+        button_bar.addStretch(1)
+        button_bar.addWidget(self._export_button)
+        timeline_pane = QWidget()
+        timeline_layout = QVBoxLayout(timeline_pane)
+        timeline_layout.setContentsMargins(0, 0, 0, 0)
+        timeline_layout.setSpacing(0)
+        timeline_layout.addLayout(button_bar)
+        timeline_layout.addWidget(self.timeline)
+        timeline_layout.addStretch(1)  # spare height below, not as gaps in between
+
         main_split = QSplitter(Qt.Orientation.Vertical)
         main_split.addWidget(top_split)
-        main_split.addWidget(self.timeline)
+        main_split.addWidget(timeline_pane)
         main_split.setStretchFactor(0, 3)
         main_split.setStretchFactor(1, 2)
 
         root_layout.addWidget(main_split)
 
         self._build_menu()
-
-        self._import_button = QPushButton("Import")
-        self._split_button = QPushButton("Split")
-        self._delete_button = QPushButton("Delete")
-        self._add_title_button = QPushButton("Add Title")
-        self._add_title_button.hide()  # titles are Phase 2; nothing to do yet
-        self._export_button = QPushButton("Export")
-        self._import_button.clicked.connect(self.media_bin.choose_files)
-        self._split_button.clicked.connect(self.timeline.split_at_playhead)
-        self._delete_button.clicked.connect(lambda: self.timeline.delete_selected(ripple=False))
-        self._export_button.clicked.connect(self._open_export_dialog)
-
-        button_row = QHBoxLayout()
-        button_row.addWidget(self._import_button)
-        button_row.addWidget(self._split_button)
-        button_row.addWidget(self._delete_button)
-        button_row.addWidget(self._add_title_button)
-        button_row.addWidget(self._export_button)
-        root_layout.addLayout(button_row)
 
         self.media_bin.media_double_clicked.connect(self._on_media_double_clicked)
         self.media_bin.remove_requested.connect(self._on_media_remove_requested)
@@ -205,6 +223,12 @@ class MainWindow(QMainWindow):
         open_action = file_menu.addAction("Open…")
         open_action.setShortcut(QKeySequence("Ctrl+O"))
         open_action.triggered.connect(self._open_project)
+
+        file_menu.addSeparator()
+
+        import_action = file_menu.addAction("Import Media…")
+        import_action.setShortcut(QKeySequence("Ctrl+I"))
+        import_action.triggered.connect(self.media_bin.choose_files)
 
         file_menu.addSeparator()
 
@@ -250,6 +274,10 @@ class MainWindow(QMainWindow):
         self._split_action.triggered.connect(self.timeline.split_at_playhead)
         self._delete_clip_action = edit_menu.addAction("Delete Clip")
         self._delete_clip_action.triggered.connect(self.timeline.delete_clip_at_playhead)
+        self._close_gap_action = edit_menu.addAction("Delete and Close Gap")
+        self._close_gap_action.triggered.connect(
+            lambda: self.timeline.delete_clip_at_playhead(close_gap=True)
+        )
         edit_menu.aboutToShow.connect(self._update_edit_actions)
 
         self._build_play_menu()
@@ -514,7 +542,9 @@ class MainWindow(QMainWindow):
         ):
             action.setEnabled(available)
             action.setText(f"{verb} {text}" if available and text else verb)
-        self._delete_clip_action.setEnabled(self.timeline.clip_index_at_playhead() is not None)
+        on_clip = self.timeline.clip_index_at_playhead() is not None
+        self._delete_clip_action.setEnabled(on_clip)
+        self._close_gap_action.setEnabled(on_clip)
 
     # --- other wiring --------------------------------------------------------------
 
@@ -630,3 +660,14 @@ class MainWindow(QMainWindow):
         self.timeline.shutdown()
         self.preview.shutdown()
         super().closeEvent(event)
+
+
+def _toolbar_button(icon: QIcon.ThemeIcon, text: str, tooltip: str) -> QPushButton:
+    """A compact button with an icon from Windows' own icon font (via Qt's
+    theme icons) and a short label. No keyboard focus, so Space keeps
+    meaning play/pause after a click instead of pressing the button again."""
+    button = QPushButton(QIcon.fromTheme(icon), text)
+    button.setIconSize(QSize(18, 18))
+    button.setToolTip(tooltip)
+    button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    return button

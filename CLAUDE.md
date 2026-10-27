@@ -161,8 +161,13 @@ vendor/                  # ffmpeg.exe, ffprobe.exe, libmpv-2.dll (gitignored; fe
 ## UI principles
 
 - Main window: **preview** (top), **media bin** (left or top-left), **timeline**
-  (bottom), and a short row of large, labeled buttons: Import, Split, Delete,
-  Add Title, Export. (Add Title stays hidden until titles exist, in Phase 2.)
+  (bottom), and a slim bar of labeled buttons on top of the timeline: Import, Split,
+  Delete, Add Title, Export. (Add Title stays hidden until titles exist, in Phase 2.)
+- Icons (these buttons, the preview's icon-only play controls) come from Windows' own
+  icon font through Qt's theme icons (`QIcon.ThemeIcon`, Qt 6.7+), so there are no
+  image files to ship. The app icon is `penultimate_cut/resources/icon.png`; run
+  `scripts/make_icon.py` after changing it to rebuild `icon.ico` (all sizes Windows
+  uses).
 - **No modes.** No razor tool, no selection-vs-cut tool switching. Splitting always
   happens **at the playhead** (button or `S`).
 - Everything clip-specific lives in the **clip properties panel** and the **right-click
@@ -183,13 +188,15 @@ vendor/                  # ffmpeg.exe, ffprobe.exe, libmpv-2.dll (gitignored; fe
 | Shift+Delete | Remove selected segment and close the gap (ripple) |
 | ← / → | Step one frame back / forward |
 | Shift+← / → | Jump 1 second |
-| + / − | Zoom timeline in / out |
+| + / − | Zoom timeline in / out (around the playhead) |
+| Mouse wheel | Zoom timeline around the pointer; Shift+wheel scrolls |
+| Ctrl+I | Import media |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Ctrl+S | Save |
 | Home / End | Jump to start / end |
 
-Keys live on menu actions so the menus show them (**Edit**: Undo, Redo, Split, Delete
-Clip; **Play**: Play / Pause, Faster, Playback Speed ▸ 0.1×–10×, frame/second steps,
+Keys live on menu actions so the menus show them (**File**: Import Media…; **Edit**: Undo,
+Redo, Split, Delete Clip, Delete and Close Gap; **Play**: Play / Pause, Faster, Playback Speed ▸ 0.1×–10×, frame/second steps,
 Go to Start/End). Only Delete, Shift+Delete and +/− are plain shortcuts. No reverse
 play (J) or separate pause (K): clicking the timeline or stepping back covers it.
 The current speed shows next to the time when it isn't 1×.
@@ -204,7 +211,8 @@ and trimming clips. In the media bin, Delete or right-click → **Remove from pr
 removes media: silently if no clip uses it, otherwise after a confirmation (its clips
 may be off-screen), as one undoable edit. Right-click a clip → **Delete clip**, or
 **Edit → Delete Clip** for the clip under the playhead (greyed out when there's none);
-both leave empty space, like Delete.
+both leave empty space, like Delete. **Delete and close gap** (right-click, Edit menu)
+is the same with later clips moving up, like Shift+Delete.
 
 ---
 
@@ -292,6 +300,8 @@ reading any instructions.
 - **Record narration** from the microphone while the preview plays.
 - **Rotate** 90° and per-clip **Fit mode**: black bars, blurred background, or crop to
   fill (see Export section).
+- **Group** two or more clips so they move together until ungrouped (needs
+  multi-select on the timeline first).
 
 ### Phase 3 — Helpful extras
 

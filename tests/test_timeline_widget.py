@@ -743,7 +743,7 @@ def test_right_click_on_a_clip_offers_delete_clip(qapp, make_video_clip) -> None
         menu = widget._canvas._build_context_menu(x_in_clip_b)
         assert menu is not None
         labels = [action.text() for action in menu.actions() if action.text()]
-        assert labels == ["Delete clip", "Delete all empty space"]
+        assert labels == ["Delete clip", "Delete and close gap", "Delete all empty space"]
 
         next(a for a in menu.actions() if a.text() == "Delete clip").trigger()
 
@@ -751,6 +751,87 @@ def test_right_click_on_a_clip_offers_delete_clip(qapp, make_video_clip) -> None
         assert items[0] is clip_a and len(items) == 1  # a trailing gap is dropped
         stack.undo()
         assert project.tracks[0].items == [clip_a, clip_b]
+
+        # On the first clip: the second one moves up to fill its place.
+        x_in_clip_a = float(widget._canvas._view.x_for_time(Fraction(1)))
+        menu = widget._canvas._build_context_menu(x_in_clip_a)
+        assert menu is not None
+        next(a for a in menu.actions() if a.text() == "Delete and close gap").trigger()
+        assert project.tracks[0].items == [clip_b]
+        stack.undo()
+        assert project.tracks[0].items == [clip_a, clip_b]
+    finally:
+        widget.shutdown()
+
+
+def _wheel(widget, x: float, delta_y: int = 0, delta_x: int = 0, modifiers=None) -> None:
+    from PySide6.QtGui import QWheelEvent
+
+    position = QPointF(x, 40)
+    event = QWheelEvent(
+        position,
+        QPointF(widget.mapToGlobal(position.toPoint())),
+        QPoint(),
+        QPoint(delta_x, delta_y),
+        Qt.MouseButton.NoButton,
+        modifiers or Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    widget.wheelEvent(event)
+
+
+def test_mouse_wheel_zooms_around_the_pointer_and_shift_wheel_scrolls(
+    qapp, make_video_clip
+) -> None:
+    source = make_video_clip("tlw_wheel.mp4", duration=10.0, fps=30, size="320x240")
+    project = make_project(source, duration=10.0)
+    stack = QUndoStack()
+
+    widget = TimelineWidget()
+    try:
+        widget.resize(300, 150)
+        widget.show()
+        widget.set_project(project, stack)
+        qapp.processEvents()
+        canvas = widget._canvas
+        canvas_view = canvas._view
+        baseline = canvas_view.pixels_per_second
+        time_under_pointer = canvas_view.time_for_x(200)
+
+        _wheel(canvas, 200, delta_y=120)  # one notch up: zoom in
+        assert canvas_view.pixels_per_second > baseline
+        # The spot under the pointer stays put (to the pixel).
+        assert abs(canvas_view.x_for_time(time_under_pointer) - 200) <= 1
+        assert widget._scrollbar.value() == round(
+            canvas_view.scroll_offset * canvas_view.pixels_per_second
+        )
+
+        # A touchpad's small deltas add up to one step.
+        zoomed = canvas_view.pixels_per_second
+        _wheel(canvas, 200, delta_y=-60)
+        assert canvas_view.pixels_per_second == zoomed
+        _wheel(canvas, 200, delta_y=-60)
+        assert canvas_view.pixels_per_second < zoomed
+
+        # Zooming out never leaves the view scrolled past the end.
+        for _ in range(10):
+            _wheel(canvas, 200, delta_y=-120)
+        assert canvas_view.scroll_offset == 0
+
+        # Shift+wheel and sideways swipes scroll instead of zooming.
+        while widget._scrollbar.maximum() == 0:
+            widget.zoom_in()
+        widget._scrollbar.setValue(0)
+        zoom = canvas_view.pixels_per_second
+        _wheel(canvas, 100, delta_y=-120, modifiers=Qt.KeyboardModifier.ShiftModifier)
+        qapp.processEvents()
+        assert widget._scrollbar.value() > 0
+        assert canvas_view.pixels_per_second == zoom
+        scrolled = widget._scrollbar.value()
+        _wheel(canvas, 100, delta_x=120)
+        assert widget._scrollbar.value() < scrolled
+        assert stack.count() == 0
     finally:
         widget.shutdown()
 
@@ -775,5 +856,11 @@ def test_delete_clip_at_playhead(qapp, make_video_clip) -> None:
         widget.delete_clip_at_playhead()
         assert isinstance(project.tracks[0].items[0], Gap)  # left as empty space
         assert project.tracks[0].items[-1] is clip_b
+
+        stack.undo()
+        widget.delete_clip_at_playhead(close_gap=True)
+        remaining = project.tracks[0].items
+        assert [type(item) for item in remaining] == [Gap, Clip]  # only the old gap is left
+        assert remaining[0].duration == 2 and remaining[1] is clip_b
     finally:
         widget.shutdown()

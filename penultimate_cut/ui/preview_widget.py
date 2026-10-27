@@ -16,16 +16,17 @@ from __future__ import annotations
 import contextlib
 from fractions import Fraction
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QProxyStyle,
-    QPushButton,
     QSlider,
     QStyle,
     QStyleHintReturn,
     QStyleOption,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -62,6 +63,21 @@ class _ClickToJumpStyle(QProxyStyle):
         return super().styleHint(hint, option, widget, returnData)
 
 
+def _icon_button(icon: QIcon.ThemeIcon, fallback_text: str, tooltip: str) -> QToolButton:
+    """A flat icon button. The icons come from Windows' own icon font (via
+    Qt's theme icons); `fallback_text` shows if a system lacks it. No
+    keyboard focus, so Space and the arrow keys keep driving playback
+    instead of pressing whichever button was clicked last."""
+    button = QToolButton()
+    button.setIcon(QIcon.fromTheme(icon))
+    button.setText(fallback_text)
+    button.setToolTip(tooltip)
+    button.setIconSize(QSize(20, 20))
+    button.setAutoRaise(True)
+    button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    return button
+
+
 class PreviewWidget(QWidget):
     position_changed = Signal(
         object
@@ -85,13 +101,15 @@ class PreviewWidget(QWidget):
         self._video_surface.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         self._video_surface.setStyleSheet("background-color: black;")
 
-        self._play_button = QPushButton("Play")
-        self._faster_button = QPushButton("Faster")
-        self._faster_button.setToolTip(
-            "Play faster: 1.5×, 2×, 4×, 10× (L). Play goes back to normal speed."
+        Icon = QIcon.ThemeIcon
+        self._play_button = _icon_button(Icon.MediaPlaybackStart, "Play", "Play (Space)")
+        self._faster_button = _icon_button(
+            Icon.MediaSeekForward,
+            "Faster",
+            "Play faster: 1.5×, 2×, 4×, 10× (L). Play goes back to normal speed.",
         )
-        self._back_button = QPushButton("◁|")
-        self._forward_button = QPushButton("|▷")
+        self._back_button = _icon_button(Icon.MediaSkipBackward, "◁|", "Previous frame (←)")
+        self._forward_button = _icon_button(Icon.MediaSkipForward, "|▷", "Next frame (→)")
         self._time_label = QLabel("00:00 / 00:00")
         self._slider = QSlider(Qt.Orientation.Horizontal)
         self._slider.setRange(0, 0)
@@ -270,7 +288,16 @@ class PreviewWidget(QWidget):
 
     def _update_play_button(self, *, playing: bool) -> None:
         # At another speed the button means "back to normal", not "pause".
-        self._play_button.setText("Pause" if playing and self._speed == 1 else "Play")
+        if playing and self._speed == 1:
+            icon, text, tooltip = QIcon.ThemeIcon.MediaPlaybackPause, "Pause", "Pause (Space)"
+        elif playing:
+            icon, text = QIcon.ThemeIcon.MediaPlaybackStart, "Play"
+            tooltip = "Play at normal speed (Space)"
+        else:
+            icon, text, tooltip = QIcon.ThemeIcon.MediaPlaybackStart, "Play", "Play (Space)"
+        self._play_button.setIcon(QIcon.fromTheme(icon))
+        self._play_button.setText(text)
+        self._play_button.setToolTip(tooltip)
 
     def _on_position_changed(self, position: Fraction | None) -> None:
         # This callback is relayed from mpv's own event thread via a queued

@@ -51,6 +51,7 @@ from PySide6.QtGui import (
     QPixmap,
     QResizeEvent,
     QUndoStack,
+    QWheelEvent,
 )
 from PySide6.QtWidgets import QMenu, QScrollBar, QSizePolicy, QVBoxLayout, QWidget
 
@@ -228,6 +229,8 @@ class _TimelineCanvas(QWidget):
         self._selected_index: int | None = None
         self._drag: DragState | None = None
         self._last_mouse_x = 0.0
+        self._wheel_zoom = 0
+        """Wheel movement not yet turned into a zoom step (120 = one notch)."""
 
         self._frame_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="filmstrip")
         self._waveform_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="waveform")
@@ -315,17 +318,52 @@ class _TimelineCanvas(QWidget):
         self._undo_stack.push(InsertCommand(self._project, self._track_index, target, item))
         self.update()
 
-    def zoom_in(self) -> None:
-        self._set_zoom(self._view.pixels_per_second * ZOOM_FACTOR)
+    def zoom_in(self, anchor_x: float | None = None) -> None:
+        self._set_zoom(self._view.pixels_per_second * ZOOM_FACTOR, anchor_x)
 
-    def zoom_out(self) -> None:
-        self._set_zoom(self._view.pixels_per_second / ZOOM_FACTOR)
+    def zoom_out(self, anchor_x: float | None = None) -> None:
+        self._set_zoom(self._view.pixels_per_second / ZOOM_FACTOR, anchor_x)
 
-    def _set_zoom(self, pixels_per_second: Fraction) -> None:
+    def _set_zoom(self, pixels_per_second: Fraction, anchor_x: float | None) -> None:
+        """Zoom keeping the time at pixel `anchor_x` where it is on screen:
+        the mouse pointer for the wheel; for the keys, the playhead if it's
+        in view, otherwise the middle."""
         clamped = max(MIN_PIXELS_PER_SECOND, min(MAX_PIXELS_PER_SECOND, pixels_per_second))
+        if anchor_x is None:
+            playhead_x = self._view.x_for_time(self._playhead)
+            anchor_x = playhead_x if 0 <= playhead_x <= self.width() else self.width() / 2
+        anchor_time = self._view.time_for_x(anchor_x)
         self._view.pixels_per_second = clamped
-        self.content_changed.emit()
+        offset = anchor_time - fraction_from_seconds(anchor_x / float(clamped))
+        track = self.track
+        visible = fraction_from_seconds(self.width() / float(clamped))
+        latest = max(Fraction(0), (track.duration if track else Fraction(0)) - visible)
+        self._view.scroll_offset = max(Fraction(0), min(offset, latest))
+        self.content_changed.emit()  # scrollbar range first, then its position
+        self.scroll_requested.emit(round(self._view.scroll_offset * clamped))
         self.update()
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """The wheel zooms around the pointer; Shift+wheel and sideways
+        touchpad swipes scroll. A one-track timeline has nothing to scroll
+        vertically, so the plain wheel is free for the more common need."""
+        delta = event.angleDelta()
+        sideways = abs(delta.x()) > abs(delta.y())
+        if sideways or event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            amount = delta.x() if sideways else delta.y()
+            left_px = round(self._view.scroll_offset * self._view.pixels_per_second)
+            self.scroll_requested.emit(left_px - round(amount / 120 * self.width() / 8))
+        else:
+            # Touchpads send many small deltas; zoom a step per notch's worth.
+            self._wheel_zoom += delta.y()
+            while abs(self._wheel_zoom) >= 120:
+                step = 120 if self._wheel_zoom > 0 else -120
+                self._wheel_zoom -= step
+                if step > 0:
+                    self.zoom_in(event.position().x())
+                else:
+                    self.zoom_out(event.position().x())
+        event.accept()
 
     def set_playhead(self, position: Fraction) -> None:
         self._playhead = max(Fraction(0), position)
@@ -721,6 +759,8 @@ class _TimelineCanvas(QWidget):
         if hit is not None and isinstance(hit_item, Clip):
             index = hit.index
             menu.addAction("Delete clip").triggered.connect(lambda: self.delete_clip(index))
+            close_gap = menu.addAction("Delete and close gap")
+            close_gap.triggered.connect(lambda: self.delete_clip(index, close_gap=True))
             menu.addSeparator()
         if hit is not None and isinstance(hit_item, Gap):
             index = hit.index
@@ -731,11 +771,14 @@ class _TimelineCanvas(QWidget):
         delete_all.triggered.connect(self.delete_all_gaps)
         return menu
 
-    def delete_clip(self, index: int) -> None:
-        """Delete the clip at `index`, leaving empty space (like the Delete key)."""
+    def delete_clip(self, index: int, *, close_gap: bool = False) -> None:
+        """Delete the clip at `index`, leaving empty space (like the Delete
+        key), or with `close_gap`, moving later clips up (Shift+Delete)."""
         if self._project is None or self._undo_stack is None:
             return
-        self._undo_stack.push(DeleteCommand(self._project, self._track_index, index, ripple=False))
+        self._undo_stack.push(
+            DeleteCommand(self._project, self._track_index, index, ripple=close_gap)
+        )
         self._select(None)
 
     def clip_index_at_playhead(self) -> int | None:
@@ -869,10 +912,10 @@ class TimelineWidget(QWidget):
     def clip_index_at_playhead(self) -> int | None:
         return self._canvas.clip_index_at_playhead()
 
-    def delete_clip_at_playhead(self) -> None:
+    def delete_clip_at_playhead(self, *, close_gap: bool = False) -> None:
         index = self._canvas.clip_index_at_playhead()
         if index is not None:
-            self._canvas.delete_clip(index)
+            self._canvas.delete_clip(index, close_gap=close_gap)
 
     def insert_clip(self, item: TrackItem, index: int | None = None) -> None:
         self._canvas.insert_clip(item, index)
