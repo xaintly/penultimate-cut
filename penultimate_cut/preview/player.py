@@ -116,6 +116,12 @@ class Player:
         self._edl_path.write_text(edl_text, encoding="utf-8", newline="\n")
         self._mpv.loadfile(str(self._edl_path), start=format_seconds(start))
 
+    def set_filters(self, video: str, audio: str) -> None:
+        """Apply lavfi filter chains (see edl.preview_filters) to playback;
+        "" clears them."""
+        self._mpv.vf = f"lavfi=[{video}]" if video else ""
+        self._mpv.af = f"lavfi=[{audio}]" if audio else ""
+
     def unload(self) -> None:
         """Stop and show nothing -- e.g. when the timeline becomes empty."""
         with contextlib.suppress(SystemError):

@@ -40,7 +40,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Literal
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QDragEnterEvent,
@@ -50,6 +50,7 @@ from PySide6.QtGui import (
     QPainter,
     QPaintEvent,
     QPixmap,
+    QPolygonF,
     QResizeEvent,
     QUndoStack,
     QWheelEvent,
@@ -101,6 +102,7 @@ FRAME_IMAGE_HEIGHT = FILMSTRIP_HEIGHT * 2
 high-DPI screens."""
 MIN_GRID_SECONDS = Fraction(1, 16)
 FRAME_CACHE_BYTES = 64 * 1024 * 1024
+EMPTY_TIMELINE_HINT = "Drag videos here, or click Import"
 """Decoded filmstrip frames kept in memory (least recently drawn dropped
 first); a screenful is about 2 MB. Frames stay cached on disk regardless."""
 
@@ -119,6 +121,9 @@ _CLIP_BORDER = QColor(80, 110, 150)
 _SELECTED_BORDER = QColor(255, 195, 0)
 _GAP_BG = QColor(45, 45, 45)
 _WAVEFORM_COLOR = QColor(170, 195, 220)
+_WAVEFORM_MUTED_COLOR = QColor(95, 110, 125)
+_FADE_SHADE = QColor(0, 0, 0, 160)
+_HINT_COLOR = QColor(150, 150, 150)
 _PLAYHEAD_COLOR = QColor(230, 40, 40)
 _LABEL_COLOR = QColor(235, 235, 235)
 
@@ -385,6 +390,13 @@ class _TimelineCanvas(QWidget):
         wanted: set[FrameKey] = set()
         if track is not None:
             self._paint_track(painter, track, wanted)
+        if track is None or not track.items:
+            painter.setPen(_HINT_COLOR)
+            painter.drawText(
+                QRect(0, TRACK_TOP, self.width(), TRACK_HEIGHT),
+                Qt.AlignmentFlag.AlignCenter,
+                EMPTY_TIMELINE_HINT,
+            )
         self._paint_playhead(painter)
         painter.end()
         self._wanted_frames = frozenset(wanted)
@@ -450,6 +462,7 @@ class _TimelineCanvas(QWidget):
         painter.fillRect(rect, _CLIP_BG)
         self._paint_filmstrip(painter, rect, clip, wanted)
         self._paint_waveform(painter, rect, clip)
+        self._paint_fades(painter, rect, clip)
         painter.setPen(_SELECTED_BORDER if selected else _CLIP_BORDER)
         painter.drawRect(rect.adjusted(0, 0, -1, -1))
         painter.setPen(_LABEL_COLOR)
@@ -457,8 +470,28 @@ class _TimelineCanvas(QWidget):
         painter.drawText(
             label_rect,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            clip.media_ref.path.name,
+            clip.media_ref.path.name + (" · muted" if clip.muted else ""),
         )
+
+    def _paint_fades(self, painter: QPainter, rect: QRect, clip: Clip) -> None:
+        """A dark wedge over each faded end, darkest where the picture is black."""
+        width = float(self._view.width_for_duration(clip.fade_length))
+        top, bottom = float(rect.top()), float(rect.bottom() + 1)
+        left, right = float(rect.left()), float(rect.right() + 1)
+        wedges = []
+        if clip.fade_in:
+            wedges.append([QPointF(left, top), QPointF(left + width, top), QPointF(left, bottom)])
+        if clip.fade_out:
+            wedges.append(
+                [QPointF(right, top), QPointF(right - width, top), QPointF(right, bottom)]
+            )
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(_FADE_SHADE)
+        for wedge in wedges:
+            painter.drawPolygon(QPolygonF(wedge))
+        painter.restore()
 
     def _paint_filmstrip(
         self, painter: QPainter, rect: QRect, clip: Clip, wanted: set[FrameKey]
@@ -506,15 +539,19 @@ class _TimelineCanvas(QWidget):
         wave_top = rect.y() + int(rect.height() * 0.6)
         wave_height = rect.height() - int(rect.height() * 0.6)
         mid_y = wave_top + wave_height // 2
-        painter.setPen(_WAVEFORM_COLOR)
+        # Drawn as loud as it'll play: taller or shorter with the clip's
+        # volume (capped at the strip), and dimmed but full size when muted.
+        half = wave_height / 2
+        scale = half * (1.0 if clip.muted else float(clip.gain))
+        painter.setPen(_WAVEFORM_MUTED_COLOR if clip.muted else _WAVEFORM_COLOR)
         # Floats, not Fractions: this runs per visible pixel on every repaint.
         source_per_pixel = float(clip.speed / self._view.pixels_per_second)
         source_in = float(clip.source_in)
         for x in range(max(rect.left(), 0), min(rect.right(), self.width() - 1) + 1):
             start = source_in + (x - rect.x()) * source_per_pixel
             lo, hi = peak_between(waveform, start, start + source_per_pixel)
-            y1 = mid_y - round(hi * (wave_height / 2))
-            y2 = mid_y - round(lo * (wave_height / 2))
+            y1 = mid_y - round(max(-half, min(half, hi * scale)))
+            y2 = mid_y - round(max(-half, min(half, lo * scale)))
             painter.drawLine(x, y1, x, max(y1, y2))
 
     def _paint_playhead(self, painter: QPainter) -> None:

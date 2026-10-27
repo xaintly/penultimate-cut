@@ -22,6 +22,13 @@ STILL_IMAGE_DEFAULT_DURATION = Fraction(5)
 """A still image's default clip length when first added to a track, per
 CLAUDE.md's Phase 1 spec ("default duration (5s), adjustable by trimming")."""
 
+MAX_VOLUME = 200
+"""Clip volume is a percentage of the original, 0-200."""
+
+FADE_LENGTH = Fraction(1)
+"""Fade in from / out to black: one second, shortened on short clips (see
+`fade_length`). No setting for it -- one less thing to learn."""
+
 
 @dataclass
 class MediaRef:
@@ -49,15 +56,32 @@ class Clip:
     media_ref: MediaRef
     source_in: Fraction
     source_out: Fraction
-    volume_db: float = 0.0
+    volume: int = 100
+    """Percent of the original loudness, 0 to `MAX_VOLUME`."""
     muted: bool = False
+    """Silent, but keeps `volume` for when it's unmuted."""
     speed: Fraction = Fraction(1)
     fit_mode: FitMode = "black_bars"
+    fade_in: bool = False
+    """Fade in from black (picture and sound) over `fade_length`."""
+    fade_out: bool = False
     id: str = field(default_factory=lambda: uuid4().hex)
 
     @property
     def duration(self) -> Fraction:
         return (self.source_out - self.source_in) / self.speed
+
+    @property
+    def gain(self) -> Fraction:
+        """What the clip's sound is multiplied by: 0 when muted, 1 unchanged."""
+        return Fraction(0) if self.muted else Fraction(self.volume, 100)
+
+    @property
+    def fade_length(self) -> Fraction:
+        """`FADE_LENGTH`, or less on a clip too short for its fades not to
+        overlap (half the clip each when it fades both ways)."""
+        room = self.duration / 2 if self.fade_in and self.fade_out else self.duration
+        return min(FADE_LENGTH, room)
 
     def __post_init__(self) -> None:
         if self.source_out <= self.source_in:
@@ -95,7 +119,7 @@ class Project:
     frame_rate: Rate
     tracks: list[Track] = field(default_factory=list)
     name: str = "Untitled"
-    schema_version: int = 2  # io/otio_io.py's SCHEMA_VERSION
+    schema_version: int = 3  # io/otio_io.py's SCHEMA_VERSION
 
     @property
     def duration(self) -> Fraction:

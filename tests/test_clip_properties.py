@@ -100,3 +100,47 @@ def test_long_filename_is_elided_and_does_not_widen_panel(qapp) -> None:
     assert shown.endswith(".mp4")  # elided in the middle, keeping the extension
     assert panel._name_label.toolTip() == long_name
     panel.close()
+
+
+def test_sound_and_fade_controls_show_the_clip_and_report_changes(qapp) -> None:
+    panel = ClipPropertiesPanel()
+    clip = make_clip()
+    clip.volume, clip.fade_out = 60, True
+    panel.set_clip(clip)
+    received: list[tuple[str, dict]] = []
+    panel.options_changed.connect(lambda text, options: received.append((text, options)))
+
+    assert panel._volume_slider.value() == 60
+    assert panel._volume_label.text() == "60%"
+    assert panel._fade_out_box.isChecked() and not panel._fade_in_box.isChecked()
+    assert received == []  # displaying isn't editing
+
+    panel._volume_slider.setValue(120)
+    panel._mute_box.setChecked(True)
+    panel._fade_in_box.setChecked(True)
+    panel._fade_out_box.setChecked(False)
+
+    assert received == [
+        ("Change volume", {"volume": 120}),
+        ("Mute", {"muted": True}),
+        ("Fade in", {"fade_in": True}),
+        ("Remove fade out", {"fade_out": False}),
+    ]
+
+
+def test_muted_clip_greys_out_the_volume_slider(qapp) -> None:
+    panel = ClipPropertiesPanel()
+    clip = make_clip()
+    clip.muted = True
+    panel.set_clip(clip)
+    assert panel._mute_box.isChecked()
+    assert not panel._volume_slider.isEnabled()
+
+
+def test_clip_without_sound_disables_volume_and_mute_but_not_fades(qapp) -> None:
+    panel = ClipPropertiesPanel()
+    panel.set_clip(make_clip(has_audio=False))
+    assert not panel._volume_slider.isEnabled()
+    assert not panel._mute_box.isEnabled()
+    assert panel._volume_label.text() == ""
+    assert panel._fade_in_box.isEnabled() and panel._fade_out_box.isEnabled()

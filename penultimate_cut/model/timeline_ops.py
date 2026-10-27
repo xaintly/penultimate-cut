@@ -11,7 +11,7 @@ from fractions import Fraction
 from typing import Literal
 from uuid import uuid4
 
-from penultimate_cut.model.project import Clip, FitMode, Gap, Track, TrackItem
+from penultimate_cut.model.project import MAX_VOLUME, Clip, FitMode, Gap, Track, TrackItem
 
 
 class TimelineOpError(ValueError):
@@ -47,11 +47,12 @@ def split_at(track: Track, position: Fraction) -> Track:
         second: TrackItem = Gap(duration=item.duration - offset)
     else:
         split_source = item.source_in + offset * item.speed
-        first = replace(item, source_out=split_source)
+        # Fades stay at the clip's outer ends, not at the new cut.
+        first = replace(item, source_out=split_source, fade_out=False)
         # A fresh id: the two halves are separate clips from here on, and
         # anything keyed by clip id (e.g. the timeline's thumbnail cache)
         # must be able to tell them apart.
-        second = replace(item, source_in=split_source, id=uuid4().hex)
+        second = replace(item, source_in=split_source, fade_in=False, id=uuid4().hex)
     new_items = [*track.items[:index], first, second, *track.items[index + 1 :]]
     return replace(track, items=new_items)
 
@@ -144,6 +145,34 @@ def set_fit_mode(track: Track, index: int, fit_mode: FitMode) -> Track:
     if not isinstance(item, Clip):
         raise TimelineOpError("a gap has no fit mode")
     new_item = replace(item, fit_mode=fit_mode)
+    new_items = [*track.items[:index], new_item, *track.items[index + 1 :]]
+    return replace(track, items=new_items)
+
+
+def set_clip_options(
+    track: Track,
+    index: int,
+    *,
+    volume: int | None = None,
+    muted: bool | None = None,
+    fade_in: bool | None = None,
+    fade_out: bool | None = None,
+) -> Track:
+    """Change a clip's volume, mute, or fades; options left as None keep
+    their current value."""
+    _check_index(track, index)
+    item = track.items[index]
+    if not isinstance(item, Clip):
+        raise TimelineOpError("a gap has no sound or fades")
+    if volume is not None and not 0 <= volume <= MAX_VOLUME:
+        raise TimelineOpError(f"volume must be 0-{MAX_VOLUME}%, not {volume}")
+    new_item = replace(
+        item,
+        volume=item.volume if volume is None else volume,
+        muted=item.muted if muted is None else muted,
+        fade_in=item.fade_in if fade_in is None else fade_in,
+        fade_out=item.fade_out if fade_out is None else fade_out,
+    )
     new_items = [*track.items[:index], new_item, *track.items[index + 1 :]]
     return replace(track, items=new_items)
 

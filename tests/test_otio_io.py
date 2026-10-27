@@ -28,10 +28,12 @@ def test_round_trip_preserves_clips_gaps_and_exact_times(tmp_path: Path) -> None
         media_ref=media,
         source_in=Fraction(5),
         source_out=Fraction(9),
-        volume_db=-6.5,
+        volume=40,
         muted=True,
         speed=Fraction(1, 2),
         fit_mode="crop_to_fill",
+        fade_in=True,
+        fade_out=True,
     )
     track = Track(kind="video", items=[clip1, Gap(duration=Fraction(2)), clip2])
     project = Project(frame_rate=Fraction(30000, 1001), tracks=[track], name="My Project")
@@ -61,10 +63,11 @@ def test_round_trip_preserves_clips_gaps_and_exact_times(tmp_path: Path) -> None
     assert isinstance(loaded_clip2, Clip)
     assert loaded_clip2.source_in == Fraction(5)
     assert loaded_clip2.source_out == Fraction(9)
-    assert loaded_clip2.volume_db == -6.5
+    assert loaded_clip2.volume == 40
     assert loaded_clip2.muted is True
     assert loaded_clip2.speed == Fraction(1, 2)
     assert loaded_clip2.fit_mode == "crop_to_fill"
+    assert (loaded_clip2.fade_in, loaded_clip2.fade_out) == (True, True)
 
 
 def test_round_trip_dedups_shared_media_ref(tmp_path: Path) -> None:
@@ -245,11 +248,37 @@ def test_loading_a_version_1_project_remeasures_media_at_display_size(
         Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip])]), project_path
     )
     text = project_path.read_text(encoding="utf-8")
-    assert '"schema_version": 2' in text
-    project_path.write_text(text.replace('"schema_version": 2', '"schema_version": 1'), "utf-8")
+    assert '"schema_version": 3' in text
+    project_path.write_text(text.replace('"schema_version": 3', '"schema_version": 1'), "utf-8")
 
     loaded = load_project(project_path).project
 
     loaded_media = loaded.tracks[0].items[0].media_ref
     assert (loaded_media.width, loaded_media.height) == (240, 320)
-    assert loaded.schema_version == 2
+    assert loaded.schema_version == 3
+
+
+def test_loading_a_version_2_project_converts_volume_db_to_percent(tmp_path: Path) -> None:
+    media = make_media(tmp_path)
+    clip = Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(4), volume=55)
+    project_path = tmp_path / "v2.otio"
+    save_project(
+        Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip])]), project_path
+    )
+    # What version 2 wrote: a dB volume, and no fade fields at all.
+    text = project_path.read_text(encoding="utf-8")
+    for old, new in [
+        ('"schema_version": 3', '"schema_version": 2'),
+        ('"volume": 55', '"volume_db": -6.0206'),
+        ('"fade_in": false,', ""),
+        ('"fade_out": false,', ""),
+    ]:
+        assert old in text, old
+        text = text.replace(old, new)
+    project_path.write_text(text, "utf-8")
+
+    loaded_clip = load_project(project_path).project.tracks[0].items[0]
+
+    assert isinstance(loaded_clip, Clip)
+    assert loaded_clip.volume == 50  # -6 dB is half the amplitude
+    assert (loaded_clip.fade_in, loaded_clip.fade_out) == (False, False)

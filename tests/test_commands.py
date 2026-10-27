@@ -8,6 +8,7 @@ from penultimate_cut.commands.timeline_commands import (
     DeleteCommand,
     InsertCommand,
     MoveCommand,
+    SetClipOptionsCommand,
     SetFitModeCommand,
     SplitCommand,
     TrimCommand,
@@ -179,3 +180,16 @@ def test_multiple_commands_undo_and_redo_in_order() -> None:
     stack.redo()
     assert len(project.tracks[0].items) == 1
     assert project.tracks[0].items[0].duration == Fraction(4)
+
+
+def test_set_clip_options_command_undoes() -> None:
+    project = make_project(make_clip())
+    original_track = project.tracks[0]
+    stack = QUndoStack()
+
+    stack.push(SetClipOptionsCommand("Mute", project, 0, 0, muted=True))
+
+    assert project.tracks[0].items[0].muted is True
+    assert stack.undoText() == "Mute"
+    stack.undo()
+    assert project.tracks[0] is original_track

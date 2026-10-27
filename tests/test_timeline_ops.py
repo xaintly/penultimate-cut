@@ -13,6 +13,7 @@ from penultimate_cut.model.timeline_ops import (
     move_item,
     remove_gaps,
     remove_media,
+    set_clip_options,
     set_fit_mode,
     split_at,
     trim_item,
@@ -214,3 +215,34 @@ def test_remove_media_leaves_empty_space_for_its_clips() -> None:
     assert len(new_track.items) == 2
     assert isinstance(new_track.items[0], Gap) and new_track.items[0].duration == Fraction(3)
     assert new_track.items[1] is keep
+
+
+def test_set_clip_options_changes_only_what_is_given() -> None:
+    track = Track(kind="video", items=[make_clip()])
+    loud = set_clip_options(track, 0, volume=150)
+    muted = set_clip_options(loud, 0, muted=True, fade_in=True)
+
+    clip = muted.items[0]
+    assert isinstance(clip, Clip)
+    assert (clip.volume, clip.muted, clip.fade_in, clip.fade_out) == (150, True, True, False)
+    assert clip.gain == 0
+    assert track.items[0].volume == 100  # the original track is untouched
+
+
+def test_set_clip_options_rejects_gaps_and_out_of_range_volume() -> None:
+    track = Track(kind="video", items=[make_clip(), Gap(duration=Fraction(2))])
+    with pytest.raises(TimelineOpError):
+        set_clip_options(track, 0, volume=201)
+    with pytest.raises(TimelineOpError):
+        set_clip_options(track, 0, volume=-1)
+    with pytest.raises(TimelineOpError):
+        set_clip_options(track, 1, muted=True)
+
+
+def test_split_keeps_fades_at_the_outer_ends() -> None:
+    clip = replace(make_clip(), fade_in=True, fade_out=True, volume=40)
+    first, second = split_at(Track(kind="video", items=[clip]), Fraction(4)).items
+    assert isinstance(first, Clip) and isinstance(second, Clip)
+    assert (first.fade_in, first.fade_out) == (True, False)
+    assert (second.fade_in, second.fade_out) == (False, True)
+    assert first.volume == second.volume == 40

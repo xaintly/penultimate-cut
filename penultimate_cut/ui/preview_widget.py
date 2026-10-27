@@ -21,20 +21,17 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
-    QProxyStyle,
     QSlider,
-    QStyle,
-    QStyleHintReturn,
-    QStyleOption,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from penultimate_cut.model.project import Project
-from penultimate_cut.preview.edl import to_edl
+from penultimate_cut.preview.edl import preview_filters, to_edl
 from penultimate_cut.preview.player import FrameStepDirection, Player
 from penultimate_cut.ui.format import format_duration, format_speed
+from penultimate_cut.ui.sliders import click_to_jump
 
 PLAYBACK_SPEEDS: tuple[Fraction, ...] = tuple(
     Fraction(s) for s in ("0.1", "0.25", "0.5", "1", "1.5", "2", "4", "10")
@@ -44,23 +41,6 @@ PLAYBACK_SPEEDS: tuple[Fraction, ...] = tuple(
 _SLIDER_RESOLUTION = 1000
 """Seek slider steps per second of timeline -- fine enough for smooth scrubbing
 without needing frame-accurate slider positions (the frame grid is much finer)."""
-
-
-class _ClickToJumpStyle(QProxyStyle):
-    """A left click anywhere on a slider's line jumps straight there (and
-    keeps dragging from there), instead of Qt's default of stepping toward
-    the pointer a page at a time."""
-
-    def styleHint(
-        self,
-        hint: QStyle.StyleHint,
-        option: QStyleOption | None = None,
-        widget: QWidget | None = None,
-        returnData: QStyleHintReturn | None = None,
-    ) -> int:
-        if hint == QStyle.StyleHint.SH_Slider_AbsoluteSetButtons:
-            return Qt.MouseButton.LeftButton.value
-        return super().styleHint(hint, option, widget, returnData)
 
 
 def _icon_button(icon: QIcon.ThemeIcon, fallback_text: str, tooltip: str) -> QToolButton:
@@ -121,10 +101,8 @@ class PreviewWidget(QWidget):
         self._volume_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # keep ←/→ for frame stepping
         self._volume_slider.setToolTip("Preview volume (doesn't change the exported video)")
 
-        self._slider_style = _ClickToJumpStyle()
-        self._slider_style.setParent(self)  # a widget's style isn't owned by the widget
-        self._slider.setStyle(self._slider_style)
-        self._volume_slider.setStyle(self._slider_style)
+        click_to_jump(self._slider)
+        click_to_jump(self._volume_slider)
 
         transport = QHBoxLayout()
         transport.addWidget(self._back_button)
@@ -185,6 +163,7 @@ class PreviewWidget(QWidget):
 
     def load_project(self, project: Project, start: Fraction = Fraction(0)) -> None:
         """Load `project` (paused), positioned at `start`."""
+        self._player.set_filters(*preview_filters(project))
         self._player.load_edl(to_edl(project), start=min(start, project.duration))
         # mpv starts playing a freshly loaded file immediately (its `pause`
         # property defaults to False and loading a new file doesn't change

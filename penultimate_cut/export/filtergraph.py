@@ -8,15 +8,18 @@ ratios per the clip's Fit Mode, fills gaps with generated black video +
 silence, and concatenates everything into a single `[outv]`/`[outa]` pair.
 `encoders.py`/`runner.py` turn this plan into an actual ffmpeg invocation.
 
-Scoped to Phase 1: exactly one track, and any clip with a non-default speed
-or volume/mute setting raises `FiltergraphError`. Those are Phase 2 features
-(pitch-correct atempo chaining, etc.) with enough real complexity to deserve
-their own pass rather than a half-built stand-in here -- their *default*
-values (speed=1, volume_db=0, muted=False) are true no-ops, so skipping them
-for now costs nothing while they're unreachable from the UI. Fit Mode is
-different: even its default ("black_bars") requires actively letterboxing a
-mismatched clip, so it's implemented in full (all three modes) rather than
-deferred, since "do nothing" would just mean stretched, distorted video.
+Scoped to one track, and any clip with a non-default speed raises
+`FiltergraphError`: speed change (pitch-correct atempo chaining, etc.) is a
+Phase 2 feature with enough real complexity to deserve its own pass, and its
+default (speed=1) is a true no-op while it's unreachable from the UI. Fit
+Mode is different: even its default ("black_bars") requires actively
+letterboxing a mismatched clip, so it's implemented in full (all three
+modes), since "do nothing" would just mean stretched, distorted video.
+
+Per-clip volume/mute and fades are applied to each clip's own segment,
+whose timestamps start at 0 after trimming, so a fade-out starts at
+`duration - fade_length`. Clips at their defaults get no extra filters, so
+their part of the graph is unchanged.
 
 Clips are cut with the `trim`/`atrim` filters (exact frame/sample boundaries
 on the fully decoded stream), not `-ss` before `-i` (fast, but only
@@ -111,8 +114,6 @@ def _clip_filters(
 ) -> tuple[list[list[str]], str, str]:
     if clip.speed != 1:
         raise FiltergraphError("speed-changed clips can't be exported yet")
-    if clip.volume_db != 0.0 or clip.muted:
-        raise FiltergraphError("per-clip volume/mute can't be exported yet")
     if not clip.media_ref.has_video:
         raise FiltergraphError("a non-video clip can't sit on the video track")
 
@@ -134,13 +135,19 @@ def _clip_filters(
             f"[{input_index}:v]trim=start={format_seconds(start)}:end={format_seconds(end)},"
             f"setpts=PTS-STARTPTS,fps={rate},{_SQUARE_PIXELS}[v{index}pre]"
         )
-    fit = _fit_stage(clip.fit_mode, width, height, f"v{index}pre", f"v{index}")
+    video_fades = _fades("fade", clip)
+    fit_label = f"v{index}fit" if video_fades else f"v{index}"
+    fit = _fit_stage(clip.fit_mode, width, height, f"v{index}pre", fit_label)
     video_filter = f"{pre};{fit}"
+    if video_fades:
+        video_filter += f";[{fit_label}]{','.join(video_fades)}[v{index}]"
 
     if clip.media_ref.has_audio:
+        sound = [] if clip.gain == 1 else [f"volume={format_seconds(clip.gain)}"]
+        sound += _fades("afade", clip)
         audio_filter = (
             f"[{input_index}:a]atrim=start={format_seconds(start)}:end={format_seconds(end)},"
-            f"asetpts=PTS-STARTPTS,{_aformat()}[a{index}]"
+            f"asetpts=PTS-STARTPTS,{','.join([_aformat(), *sound])}[a{index}]"
         )
     else:
         inputs.append(
@@ -150,6 +157,21 @@ def _clip_filters(
         audio_filter = f"[{filler_index}:a]{_aformat()}[a{index}]"
 
     return inputs, video_filter, audio_filter
+
+
+def _fades(filter_name: str, clip: Clip) -> list[str]:
+    """`fade` (video) or `afade` (audio) filters for the clip's fade in from
+    / out to black, timed within its own segment."""
+    length = clip.fade_length
+    fades = []
+    if clip.fade_in:
+        fades.append(f"{filter_name}=t=in:st=0:d={format_seconds(length)}")
+    if clip.fade_out:
+        fades.append(
+            f"{filter_name}=t=out:st={format_seconds(clip.duration - length)}"
+            f":d={format_seconds(length)}"
+        )
+    return fades
 
 
 def _gap_filters(

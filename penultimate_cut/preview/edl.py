@@ -25,6 +25,14 @@ subtly wrong:
   anywhere since it's infinite). `start` is forced to 0 for still-image
   clips here regardless of the clip's own `source_in`.
 
+EDL has no per-segment filters, so clip volume/mute and fades are previewed
+by `preview_filters`: one video and one audio filter chain for the whole
+timeline, each filter switched on (`enable=`) only during its clip's span.
+Checked against a live libmpv: the filters see timeline time (a fade on the
+second clip lands at its start, also when playback starts mid-fade); audio
+switches within about 20 ms of a clip boundary, since it's filtered in
+chunks. Export applies the same settings per clip, exactly.
+
 EDL timestamps are plain floating-point seconds -- there's no way to carry
 our exact `Fraction` times through this format. That's fine for preview
 scrubbing; export still cuts on exact frame boundaries via the ffmpeg
@@ -65,6 +73,43 @@ def to_edl(project: Project) -> str:
         for item in track.items:
             lines.append(_item_line(item, track.kind, project.frame_rate, width, height))
     return "\n".join(lines) + "\n"
+
+
+def preview_filters(project: Project) -> tuple[str, str]:
+    """(video, audio) lavfi filter chains for the clips' fades, volume, and
+    mute, in timeline time; "" when there's nothing to apply."""
+    video: list[str] = []
+    audio: list[str] = []
+    for track in project.tracks:
+        start = Fraction(0)
+        for item in track.items:
+            if isinstance(item, Clip):
+                _add_clip_filters(item, start, video, audio)
+            start += item.duration
+    return ",".join(video), ",".join(audio)
+
+
+def _add_clip_filters(clip: Clip, start: Fraction, video: list[str], audio: list[str]) -> None:
+    end = start + clip.duration
+    has_audio = clip.media_ref.has_audio
+    if has_audio and clip.gain != 1:
+        audio.append(f"volume=volume={format_seconds(clip.gain)}:{_during(start, end)}")
+    length = clip.fade_length
+    fades = []
+    if clip.fade_in:
+        fades.append(("in", start))
+    if clip.fade_out:
+        fades.append(("out", end - length))
+    for direction, fade_start in fades:
+        timing = f"t={direction}:st={format_seconds(fade_start)}:d={format_seconds(length)}"
+        span = _during(fade_start, fade_start + length)
+        video.append(f"fade={timing}:{span}")
+        if has_audio:
+            audio.append(f"afade={timing}:{span}")
+
+
+def _during(start: Fraction, end: Fraction) -> str:
+    return f"enable='between(t,{format_seconds(start)},{format_seconds(end)})'"
 
 
 def _item_line(

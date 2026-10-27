@@ -26,16 +26,27 @@ from uuid import uuid4
 import opentimelineio as otio
 
 from penultimate_cut.media.probe import ProbeError, probe
-from penultimate_cut.model.project import Clip, Gap, MediaRef, Project, Track, TrackItem, TrackKind
+from penultimate_cut.model.project import (
+    MAX_VOLUME,
+    Clip,
+    Gap,
+    MediaRef,
+    Project,
+    Track,
+    TrackItem,
+    TrackKind,
+)
 from penultimate_cut.model.time import Rate, frame_to_seconds, seconds_to_frame
 
 METADATA_KEY = "penultimate_cut"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 """Version history (bump + add a migration in `_migrate` on every change):
 
 1. Initial.
 2. Media width/height are the *display* size (rotation and non-square
    pixels applied -- see media/probe.py), not the stored frame size.
+3. Clip `volume` is a percentage (was `volume_db`, converted in
+   `_clip_from_otio`); clips gain `fade_in`/`fade_out` (absent = off).
 """
 
 _ADAPTER_NAME = "otio_json"
@@ -249,10 +260,12 @@ def _clip_to_otio(clip: Clip, path: Path) -> otio.schema.Clip:
         "clip_id": clip.id,
         "source_in": str(clip.source_in),
         "source_out": str(clip.source_out),
-        "volume_db": clip.volume_db,
+        "volume": clip.volume,
         "muted": clip.muted,
         "speed": str(clip.speed),
         "fit_mode": clip.fit_mode,
+        "fade_in": clip.fade_in,
+        "fade_out": clip.fade_out,
     }
     return otio_clip
 
@@ -275,12 +288,22 @@ def _clip_from_otio(
         media_ref=media_ref,
         source_in=source_in,
         source_out=source_out,
-        volume_db=meta.get("volume_db", 0.0),
+        volume=_volume_from_meta(meta),
         muted=meta.get("muted", False),
         speed=Fraction(meta["speed"]) if "speed" in meta else Fraction(1),
         fit_mode=meta.get("fit_mode", "black_bars"),  # type: ignore[arg-type]
+        fade_in=meta.get("fade_in", False),
+        fade_out=meta.get("fade_out", False),
         id=meta.get("clip_id") or uuid4().hex,
     )
+
+
+def _volume_from_meta(meta: dict) -> int:
+    """Schema 3's percentage, or a schema 1-2 `volume_db` converted to one."""
+    if "volume" in meta:
+        return int(meta["volume"])
+    percent = round(100 * 10 ** (float(meta.get("volume_db", 0.0)) / 20))
+    return max(0, min(MAX_VOLUME, percent))
 
 
 # --- MediaRef -------------------------------------------------------------------

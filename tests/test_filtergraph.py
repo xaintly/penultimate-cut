@@ -105,17 +105,48 @@ def test_speed_changed_clip_rejected(tmp_path: Path) -> None:
         build_filtergraph(project)
 
 
-@pytest.mark.parametrize("kwargs", [{"volume_db": -6.0}, {"muted": True}])
-def test_nondefault_volume_or_mute_rejected(tmp_path: Path, kwargs: dict) -> None:
+@pytest.mark.parametrize(
+    ("kwargs", "audio_tail"),
+    [
+        ({}, "aformat=sample_rates=48000:channel_layouts=stereo[a0]"),
+        ({"volume": 50}, "channel_layouts=stereo,volume=0.500000[a0]"),
+        ({"volume": 50, "muted": True}, "channel_layouts=stereo,volume=0.000000[a0]"),
+        (
+            {"fade_in": True, "fade_out": True},
+            "stereo,afade=t=in:st=0:d=1.000000,afade=t=out:st=2.000000:d=1.000000[a0]",
+        ),
+    ],
+)
+def test_volume_mute_and_fades_filter_each_clip_segment(
+    tmp_path: Path, kwargs: dict, audio_tail: str
+) -> None:
     clip = Clip(
         media_ref=make_media(tmp_path / "a.mp4"),
         source_in=Fraction(0),
-        source_out=Fraction(2),
+        source_out=Fraction(3),
         **kwargs,
     )
     project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip])])
-    with pytest.raises(FiltergraphError):
-        build_filtergraph(project)
+    graph = build_filtergraph(project).filter_complex
+    assert audio_tail in graph
+    if kwargs.get("fade_in"):
+        assert "[v0fit]fade=t=in:st=0:d=1.000000,fade=t=out:st=2.000000:d=1.000000[v0]" in graph
+    else:
+        assert "fade" not in graph
+
+
+def test_fades_on_a_short_clip_share_its_length(tmp_path: Path) -> None:
+    clip = Clip(
+        media_ref=make_media(tmp_path / "a.mp4"),
+        source_in=Fraction(0),
+        source_out=Fraction(3, 2),
+        fade_in=True,
+        fade_out=True,
+    )
+    assert clip.fade_length == Fraction(3, 4)
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip])])
+    graph = build_filtergraph(project).filter_complex
+    assert "fade=t=in:st=0:d=0.750000,fade=t=out:st=0.750000:d=0.750000" in graph
 
 
 def test_audio_only_media_on_video_track_rejected(tmp_path: Path) -> None:
@@ -245,6 +276,45 @@ def test_export_single_clip_has_correct_duration_and_resolution(
     assert info.has_video and info.has_audio
     assert info.width == 320 and info.height == 240
     assert abs(info.duration - Fraction(2)) < Fraction(1, 15)
+
+
+def _brightness_at(path: Path, seconds: float) -> int:
+    """Average brightness (0-255) of the frame at `seconds`."""
+    result = subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-ss", str(seconds), "-i", str(path),
+         "-frames:v", "1", "-vf", "scale=1:1", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+        check=True, capture_output=True,
+    )  # fmt: skip
+    return result.stdout[0]
+
+
+def _loudness(path: Path, start: float, length: float) -> float:
+    """Mean volume in dB over `[start, start + length)`; about -91 is silence."""
+    result = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-ss", str(start), "-t", str(length), "-i", str(path),
+         "-vn", "-af", "volumedetect", "-f", "null", "-"],
+        check=True, capture_output=True, text=True,
+    )  # fmt: skip
+    line = next(x for x in result.stderr.splitlines() if "mean_volume" in x)
+    return float(line.split("mean_volume:")[1].split("dB")[0])
+
+
+def test_export_fades_and_mutes_for_real(tmp_path: Path, make_video_clip) -> None:
+    source = make_video_clip("filt_fade.mp4", duration=3.0, fps=30, size="320x240")
+    media = make_media(source)
+    faded = Clip(
+        media_ref=media, source_in=Fraction(0), source_out=Fraction(3), fade_in=True, fade_out=True
+    )
+    muted = Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(2), muted=True)
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[faded, muted])])
+
+    output_path = render(tmp_path, build_filtergraph(project))
+
+    assert _brightness_at(output_path, 0.0) < 20  # black at the start of the fade in
+    assert _brightness_at(output_path, 1.5) > 60  # full picture between the fades
+    assert _brightness_at(output_path, 2.9) < 20  # nearly black near the end of the fade out
+    assert _loudness(output_path, 1.2, 0.6) > -40  # the faded clip's sound, mid-clip
+    assert _loudness(output_path, 3.2, 1.5) < -80  # the muted clip
 
 
 def test_export_clip_and_gap_total_duration(tmp_path: Path, make_video_clip) -> None:

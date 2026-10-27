@@ -114,6 +114,32 @@ class SetFitModeCommand(_TrackSwapCommand):
         super().__init__("Change fit mode", project, track_index, new_track)
 
 
+class SetClipOptionsCommand(_TrackSwapCommand):
+    """Change a clip's volume, mute, or fades (see `timeline_ops.set_clip_options`)."""
+
+    def __init__(
+        self,
+        text: str,
+        project: Project,
+        track_index: int,
+        item_index: int,
+        *,
+        volume: int | None = None,
+        muted: bool | None = None,
+        fade_in: bool | None = None,
+        fade_out: bool | None = None,
+    ) -> None:
+        new_track = timeline_ops.set_clip_options(
+            project.tracks[track_index],
+            item_index,
+            volume=volume,
+            muted=muted,
+            fade_in=fade_in,
+            fade_out=fade_out,
+        )
+        super().__init__(text, project, track_index, new_track)
+
+
 class InsertCommand(_TrackSwapCommand):
     """Place a new clip (or gap) onto the track, e.g. from the media bin."""
 
