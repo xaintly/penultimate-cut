@@ -175,13 +175,15 @@ class MainWindow(QMainWindow):
         timeline_layout.setSpacing(0)
         timeline_layout.addLayout(button_bar)
         timeline_layout.addWidget(self.timeline)
-        timeline_layout.addStretch(1)  # spare height below, not as gaps in between
+        # One track needs no more height than this; the preview gets the rest.
+        # (Phase 2's extra tracks will need this to grow.)
+        timeline_pane.setMaximumHeight(timeline_pane.sizeHint().height())
 
         main_split = QSplitter(Qt.Orientation.Vertical)
         main_split.addWidget(top_split)
         main_split.addWidget(timeline_pane)
-        main_split.setStretchFactor(0, 3)
-        main_split.setStretchFactor(1, 2)
+        main_split.setStretchFactor(0, 1)
+        main_split.setStretchFactor(1, 0)
 
         root_layout.addWidget(main_split)
 
