@@ -16,3 +16,9 @@ def format_duration(value: Fraction | None) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes:02d}:{seconds:02d}"
+
+
+def format_speed(speed: Fraction) -> str:
+    """`2×`, `1.5×`, `0.25×` -- no trailing zeros."""
+    text = f"{float(speed):.2f}".rstrip("0").rstrip(".")
+    return f"{text}×"

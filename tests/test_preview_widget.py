@@ -106,6 +106,46 @@ def test_play_pause_updates_button_text(widget, make_video_clip) -> None:
     assert widget._play_button.text() == "Play"
 
 
+def test_faster_steps_up_and_play_returns_to_normal_speed(widget, make_video_clip) -> None:
+    source = make_video_clip("pw_speed.mp4", duration=3.0, fps=30, size="320x240")
+    widget.load_project(make_project(source, duration=3.0))
+    assert widget.player.wait_until_ready(timeout=8)
+    widget.pause()
+    try:
+        # From paused, Faster starts playing at the first step up.
+        widget.faster()
+        assert widget.player.is_playing
+        assert widget.speed == Fraction(3, 2)
+        assert widget.player.speed == Fraction(3, 2)
+        assert widget._time_label.text().endswith("(1.5×)")
+        assert widget._play_button.text() == "Play"  # means "back to normal" now
+
+        for expected in (2, 4, 10, 10):  # stays at the top speed
+            widget.faster()
+            assert widget.speed == expected
+
+        # Play while fast: back to 1x, still playing.
+        widget.toggle_play_pause()
+        assert widget.player.is_playing
+        assert widget.speed == 1
+        assert widget._play_button.text() == "Pause"
+        assert "×" not in widget._time_label.text()
+
+        # Play at 1x pauses.
+        widget.toggle_play_pause()
+        assert not widget.player.is_playing
+
+        # A chosen speed plays at that speed; Faster from a slow speed goes
+        # to the next speed up.
+        widget.play_at_speed(Fraction(1, 4))
+        assert widget.player.is_playing and widget.speed == Fraction(1, 4)
+        widget.faster()
+        assert widget.speed == Fraction(1, 2)
+    finally:
+        widget.toggle_play_pause()  # back to 1x
+        widget.pause()
+
+
 def test_frame_step_buttons_move_the_playhead(widget, make_video_clip) -> None:
     source = make_video_clip("pw_c.mp4", duration=2.0, fps=30, size="320x240")
     project = make_project(source, duration=2.0)

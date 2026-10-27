@@ -62,7 +62,23 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         assert window.timeline is not None
         assert window.clip_properties is not None
         assert len(window.project.tracks) == 1
-        assert len(window._shortcuts) == 6
+        # Only Delete, Shift+Delete, +, - are plain shortcuts; every other
+        # key lives on a menu action, so the menus show it.
+        assert len(window._shortcuts) == 4
+        menu_keys = {
+            action.text(): action.shortcut().toString()
+            for menu_action in window.menuBar().actions()
+            for action in menu_action.menu().actions()
+            if not action.shortcut().isEmpty()
+        }
+        assert menu_keys["Split"] == "S"
+        assert menu_keys["Play / Pause"] == "Space"
+        assert menu_keys["Faster"] == "L"
+        assert menu_keys["Next Frame"] == "Right"
+        assert menu_keys["Back 1 Second"] == "Shift+Left"
+        assert menu_keys["Go to Start"] == "Home"
+        assert menu_keys["Go to End"] == "End"
+        assert window._add_title_button.isHidden()  # Phase 2
         # Undo/Redo live in the Edit menu (with their Ctrl+Z/Ctrl+Y
         # shortcuts), disabled while there's nothing to undo/redo.
         assert window._undo_action.shortcut().toString() == "Ctrl+Z"
@@ -148,6 +164,24 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         assert window.project.tracks[0].items == []
         window.undo_stack.undo()
         assert len(window.project.tracks[0].items) == 1
+
+        # Play menu jumps move the playhead, clamped to the timeline.
+        play_actions = {
+            action.text(): action
+            for menu_action in window.menuBar().actions()
+            if menu_action.text() == "&Play"
+            for action in menu_action.menu().actions()
+        }
+        play_actions["Go to End"].trigger()
+        assert window.timeline.playhead == window.project.duration == Fraction(2)
+        play_actions["Forward 1 Second"].trigger()
+        assert window.timeline.playhead == Fraction(2)
+        play_actions["Back 1 Second"].trigger()
+        assert window.timeline.playhead == Fraction(1)
+        play_actions["Go to Start"].trigger()
+        assert window.timeline.playhead == 0
+        play_actions["Back 1 Second"].trigger()
+        assert window.timeline.playhead == 0
 
         # Dragging a media bin entry onto the timeline: same as
         # double-click, but landing at a specific index instead of always

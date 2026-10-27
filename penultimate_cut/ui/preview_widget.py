@@ -22,7 +22,12 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLa
 from penultimate_cut.model.project import Project
 from penultimate_cut.preview.edl import to_edl
 from penultimate_cut.preview.player import FrameStepDirection, Player
-from penultimate_cut.ui.format import format_duration
+from penultimate_cut.ui.format import format_duration, format_speed
+
+PLAYBACK_SPEEDS: tuple[Fraction, ...] = tuple(
+    Fraction(s) for s in ("0.1", "0.25", "0.5", "1", "1.5", "2", "4", "10")
+)
+"""Choices in Play > Playback Speed; Faster steps up through these."""
 
 _SLIDER_RESOLUTION = 1000
 """Seek slider steps per second of timeline -- fine enough for smooth scrubbing
@@ -34,6 +39,7 @@ class PreviewWidget(QWidget):
         object
     )  # Fraction | None; object avoids a C++ signal type for Fraction
     volume_changed = Signal(int)  # 0-100, from the user moving the volume slider
+    speed_changed = Signal(object)  # Fraction
     _playing_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None, **player_options: object) -> None:
@@ -52,6 +58,10 @@ class PreviewWidget(QWidget):
         self._video_surface.setStyleSheet("background-color: black;")
 
         self._play_button = QPushButton("Play")
+        self._faster_button = QPushButton("Faster")
+        self._faster_button.setToolTip(
+            "Play faster: 1.5×, 2×, 4×, 10× (L). Play goes back to normal speed."
+        )
         self._back_button = QPushButton("◁|")
         self._forward_button = QPushButton("|▷")
         self._time_label = QLabel("00:00 / 00:00")
@@ -68,6 +78,7 @@ class PreviewWidget(QWidget):
         transport = QHBoxLayout()
         transport.addWidget(self._back_button)
         transport.addWidget(self._play_button)
+        transport.addWidget(self._faster_button)
         transport.addWidget(self._forward_button)
         transport.addWidget(self._slider)
         transport.addWidget(self._time_label)
@@ -81,6 +92,8 @@ class PreviewWidget(QWidget):
 
         self._dragging = False
         self._duration: Fraction | None = None
+        self._position: Fraction | None = None
+        self._speed = Fraction(1)
 
         self._player = Player(
             wid=int(self._video_surface.winId()),
@@ -96,6 +109,7 @@ class PreviewWidget(QWidget):
         self._player.pause()
 
         self._play_button.clicked.connect(self.toggle_play_pause)
+        self._faster_button.clicked.connect(self.faster)
         self._back_button.clicked.connect(lambda: self.frame_step("backward"))
         self._forward_button.clicked.connect(lambda: self.frame_step("forward"))
         self._slider.sliderPressed.connect(self._on_slider_pressed)
@@ -128,28 +142,59 @@ class PreviewWidget(QWidget):
         # call, since `MainWindow` reloads on every undo-stack change) would
         # silently resume playback the user never asked for.
         self._player.pause()
-        self._play_button.setText("Play")
+        self._update_play_button(playing=False)
 
     def clear(self) -> None:
         """Show nothing: the timeline is empty."""
         self._player.unload()
         self._duration = None
         self._slider.setRange(0, 0)
-        self._time_label.setText(f"{format_duration(None)} / {format_duration(None)}")
+        self._position = None
+        self._update_time_label()
 
     # --- transport ----------------------------------------------------------------
 
     def play(self) -> None:
         self._player.play()
-        self._play_button.setText("Pause")
+        self._update_play_button(playing=True)
 
     def pause(self) -> None:
         self._player.pause()
-        self._play_button.setText("Play")
+        self._update_play_button(playing=False)
 
     def toggle_play_pause(self) -> None:
-        self._player.toggle_play_pause()
-        self._play_button.setText("Pause" if self._player.is_playing else "Play")
+        """Play always means normal speed: from paused, play at 1×; while
+        playing faster or slower, drop back to 1× and keep playing; only
+        pause when already playing at 1×."""
+        if self._player.is_playing and self._speed == 1:
+            self.pause()
+        else:
+            self._set_speed(Fraction(1))
+            self.play()
+
+    @property
+    def speed(self) -> Fraction:
+        return self._speed
+
+    def play_at_speed(self, speed: Fraction) -> None:
+        self._set_speed(speed)
+        self.play()
+
+    def faster(self) -> None:
+        """Step up to the next speed (1.5×, 2×, 4×, 10×; stays at 10×),
+        starting playback if paused -- counting up from 1× in that case."""
+        current = self._speed if self._player.is_playing else Fraction(1)
+        higher = [speed for speed in PLAYBACK_SPEEDS if speed > current]
+        self.play_at_speed(higher[0] if higher else PLAYBACK_SPEEDS[-1])
+
+    def _set_speed(self, speed: Fraction) -> None:
+        if speed == self._speed:
+            return
+        self._speed = speed
+        self._player.speed = speed
+        self._update_time_label()
+        self._update_play_button(playing=self._player.is_playing)
+        self.speed_changed.emit(speed)
 
     def seek(self, position: Fraction) -> None:
         self._player.seek(position)
@@ -186,7 +231,11 @@ class PreviewWidget(QWidget):
         self._player.seek(_slider_value_to_seconds(value))
 
     def _on_playing_changed(self, playing: bool) -> None:
-        self._play_button.setText("Pause" if playing else "Play")
+        self._update_play_button(playing=playing)
+
+    def _update_play_button(self, *, playing: bool) -> None:
+        # At another speed the button means "back to normal", not "pause".
+        self._play_button.setText("Pause" if playing and self._speed == 1 else "Play")
 
     def _on_position_changed(self, position: Fraction | None) -> None:
         # This callback is relayed from mpv's own event thread via a queued
@@ -207,7 +256,14 @@ class PreviewWidget(QWidget):
         if position is not None and not self._dragging:
             self._slider.setValue(int(position * _SLIDER_RESOLUTION))
 
-        self._time_label.setText(f"{format_duration(position)} / {format_duration(self._duration)}")
+        self._position = position
+        self._update_time_label()
+
+    def _update_time_label(self) -> None:
+        text = f"{format_duration(self._position)} / {format_duration(self._duration)}"
+        if self._speed != 1:
+            text += f" ({format_speed(self._speed)})"
+        self._time_label.setText(text)
 
 
 def _slider_value_to_seconds(value: int) -> Fraction:

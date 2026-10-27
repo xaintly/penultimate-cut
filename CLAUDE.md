@@ -162,7 +162,7 @@ vendor/                  # ffmpeg.exe, ffprobe.exe, libmpv-2.dll (gitignored; fe
 
 - Main window: **preview** (top), **media bin** (left or top-left), **timeline**
   (bottom), and a short row of large, labeled buttons: Import, Split, Delete,
-  Add Title, Export.
+  Add Title, Export. (Add Title stays hidden until titles exist, in Phase 2.)
 - **No modes.** No razor tool, no selection-vs-cut tool switching. Splitting always
   happens **at the playhead** (button or `S`).
 - Everything clip-specific lives in the **clip properties panel** and the **right-click
@@ -176,21 +176,27 @@ vendor/                  # ffmpeg.exe, ffprobe.exe, libmpv-2.dll (gitignored; fe
 
 | Key | Action |
 |---|---|
-| Space | Play / pause |
+| Space | Play / pause; while playing faster or slower, back to normal speed |
+| L | Faster: 1.5× → 2× → 4× → 10× (starts playing if paused) |
 | S | Split at playhead |
 | Delete | Remove selected segment and leave empty space (like Movie Maker/Clipchamp) |
 | Shift+Delete | Remove selected segment and close the gap (ripple) |
-
-Empty space on the timeline (a `Gap`) plays as black + silence. Right-click it for
-**Delete empty space**; right-click anywhere on the timeline for **Delete all empty
-space**. Selecting empty space and pressing Delete also closes it.
 | ← / → | Step one frame back / forward |
 | Shift+← / → | Jump 1 second |
-| J / K / L | Reverse / pause / forward; repeat J or L to speed up |
 | + / − | Zoom timeline in / out |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Ctrl+S | Save |
 | Home / End | Jump to start / end |
+
+Keys live on menu actions so the menus show them (**Edit**: Undo, Redo, Split, Delete
+Clip; **Play**: Play / Pause, Faster, Playback Speed ▸ 0.1×–10×, frame/second steps,
+Go to Start/End). Only Delete, Shift+Delete and +/− are plain shortcuts. No reverse
+play (J) or separate pause (K): clicking the timeline or stepping back covers it.
+The current speed shows next to the time when it isn't 1×.
+
+Empty space on the timeline (a `Gap`) plays as black + silence. Right-click it for
+**Delete empty space**; right-click anywhere on the timeline for **Delete all empty
+space**. Selecting empty space and pressing Delete also closes it.
 
 On the timeline, **right-click and drag** scrolls (the content follows the mouse);
 a right-click without dragging opens the menu. Left-drag stays reserved for moving
@@ -245,7 +251,9 @@ This plays in every browser, LMS, and media player that matters.
 ### Phase 1 — Core (the everyday editor)
 
 - Import video, audio, and still images (drag-and-drop or button); old formats
-  (AVI, WMV, MPG, MOV) must work.
+  (AVI, WMV, MPG, MOV) must work. Audio-only files import, but using them on the
+  timeline waits for Phase 2's audio track (the single Phase 1 track is video; for
+  now an audio-only clip can be dropped there, and export refuses it).
 - Media bin with thumbnails and durations.
 - Timeline: one video track + its linked audio; scroll and zoom; filmstrip thumbnails;
   audio waveform.
@@ -265,6 +273,7 @@ reading any instructions.
 ### Phase 2 — Occasional needs
 
 - Detach audio from video; edit audio separately.
+- Audio-only files (music, narration) on the timeline, via an additional audio track.
 - Additional audio track (music); **audio mix** slider (favor narration vs. music);
   optional automatic **ducking** under speech.
 - Per-clip volume and **mute**.

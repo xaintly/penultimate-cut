@@ -211,7 +211,8 @@ class Player:
 
     @speed.setter
     def speed(self, value: Fraction) -> None:
-        self._mpv.speed = float(value)
+        with contextlib.suppress(SystemError):
+            self._mpv.speed = float(value)
 
     @property
     def volume(self) -> int:

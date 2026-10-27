@@ -53,11 +53,20 @@ real widgets together:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from fractions import Fraction
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut, QUndoCommand, QUndoStack
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QCloseEvent,
+    QKeySequence,
+    QShortcut,
+    QUndoCommand,
+    QUndoStack,
+)
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -85,8 +94,9 @@ from penultimate_cut.io.otio_io import (
 from penultimate_cut.model.project import Clip, FitMode, MediaRef, Project, Track, default_clip_for
 from penultimate_cut.ui.clip_properties import ClipPropertiesPanel
 from penultimate_cut.ui.export_dialog import ExportDialog
+from penultimate_cut.ui.format import format_speed
 from penultimate_cut.ui.media_bin import MediaBin, MediaBinEntry
-from penultimate_cut.ui.preview_widget import PreviewWidget
+from penultimate_cut.ui.preview_widget import PLAYBACK_SPEEDS, PreviewWidget
 from penultimate_cut.ui.settings import (
     default_folder,
     load_preview_volume,
@@ -144,6 +154,7 @@ class MainWindow(QMainWindow):
         self._split_button = QPushButton("Split")
         self._delete_button = QPushButton("Delete")
         self._add_title_button = QPushButton("Add Title")
+        self._add_title_button.hide()  # titles are Phase 2; nothing to do yet
         self._export_button = QPushButton("Export")
         self._import_button.clicked.connect(self.media_bin.choose_files)
         self._split_button.clicked.connect(self.timeline.split_at_playhead)
@@ -229,17 +240,66 @@ class MainWindow(QMainWindow):
         self._redo_action.setShortcut(QKeySequence("Ctrl+Y"))
         self._redo_action.triggered.connect(lambda: self.undo_stack.redo())
         edit_menu.addSeparator()
-        # No Delete shortcut on this action: the Delete key is a shortcut of
-        # its own that acts on the media bin *or* the timeline (see
-        # _on_delete_key). Enabled state is refreshed whenever the menu opens.
+        # Both act at the playhead. Split stays enabled (it's a no-op off a
+        # clip): its S key must work even if the menu's state is stale.
+        # Delete Clip greys out, refreshed whenever the menu opens; it has no
+        # Delete shortcut because the Delete key is a shortcut of its own that
+        # acts on the media bin *or* the timeline (see _on_delete_key).
+        self._split_action = edit_menu.addAction("Split")
+        self._split_action.setShortcut(QKeySequence("S"))
+        self._split_action.triggered.connect(self.timeline.split_at_playhead)
         self._delete_clip_action = edit_menu.addAction("Delete Clip")
         self._delete_clip_action.triggered.connect(self.timeline.delete_clip_at_playhead)
         edit_menu.aboutToShow.connect(self._update_edit_actions)
 
+        self._build_play_menu()
+
+    def _build_play_menu(self) -> None:
+        play_menu = self.menuBar().addMenu("&Play")
+
+        def add(text: str, key: str, handler: Callable[[], None]) -> QAction:
+            action = play_menu.addAction(text)
+            action.setShortcut(QKeySequence(key))
+            action.triggered.connect(handler)
+            return action
+
+        add("Play / Pause", "Space", self.preview.toggle_play_pause)
+        add("Faster", "L", self.preview.faster)
+
+        speed_menu = play_menu.addMenu("Playback Speed")
+        speed_group = QActionGroup(self)
+        self._speed_actions: dict[Fraction, QAction] = {}
+        for speed in PLAYBACK_SPEEDS:
+            label = "Normal (1×)" if speed == 1 else format_speed(speed)
+            action = speed_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(speed == 1)
+            speed_group.addAction(action)
+            action.triggered.connect(lambda _checked=False, s=speed: self.preview.play_at_speed(s))
+            self._speed_actions[speed] = action
+        self.preview.speed_changed.connect(lambda s: self._speed_actions[s].setChecked(True))
+
+        play_menu.addSeparator()
+        add("Next Frame", "Right", lambda: self.preview.frame_step("forward"))
+        add("Previous Frame", "Left", lambda: self.preview.frame_step("backward"))
+        add("Forward 1 Second", "Shift+Right", lambda: self._jump_by(Fraction(1)))
+        add("Back 1 Second", "Shift+Left", lambda: self._jump_by(Fraction(-1)))
+        play_menu.addSeparator()
+        add("Go to Start", "Home", lambda: self._jump_to(Fraction(0)))
+        add("Go to End", "End", lambda: self._jump_to(self.project.duration))
+
+    def _jump_by(self, delta: Fraction) -> None:
+        self._jump_to(self.timeline.playhead + delta)
+
+    def _jump_to(self, position: Fraction) -> None:
+        position = max(Fraction(0), min(position, self.project.duration))
+        self.timeline.set_playhead(position)
+        self.preview.seek(position)
+
     def _init_shortcuts(self) -> None:
+        # Everything else has its key on a menu action (so the menus show
+        # it); these have no menu item of their own.
         shortcuts = [
-            ("Space", self.preview.toggle_play_pause),
-            ("S", self.timeline.split_at_playhead),
             ("Delete", self._on_delete_key),
             ("Shift+Delete", lambda: self.timeline.delete_selected(ripple=True)),
             ("+", self.timeline.zoom_in),
