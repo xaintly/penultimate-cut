@@ -30,7 +30,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import IO
 
-from penultimate_cut.media.executables import ExecutableNotFoundError, locate
+from penultimate_cut.media.executables import NO_WINDOW, ExecutableNotFoundError, locate
 
 
 class RunnerError(RuntimeError):
@@ -77,6 +77,7 @@ def run_export(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        creationflags=NO_WINDOW,
     )
     assert process.stdout is not None
     assert process.stderr is not None

@@ -18,7 +18,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from penultimate_cut.media.cache import cache_dir_for
-from penultimate_cut.media.executables import ExecutableNotFoundError, locate
+from penultimate_cut.media.executables import NO_WINDOW, ExecutableNotFoundError, locate
 
 DEFAULT_WIDTH = 160
 
@@ -94,7 +94,7 @@ def _extract_frame(
         str(out_path),
     ]
     try:
-        subprocess.run(args, check=True, capture_output=True, text=True)
+        subprocess.run(args, check=True, capture_output=True, text=True, creationflags=NO_WINDOW)
     except subprocess.CalledProcessError as exc:
         raise ThumbnailError(f"{media_path}: ffmpeg failed: {exc.stderr.strip()}") from exc
     if not out_path.exists():

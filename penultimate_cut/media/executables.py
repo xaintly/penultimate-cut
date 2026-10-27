@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import platform
 import shutil
+import subprocess
 import sys
 from pathlib import Path
+
+NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+"""`creationflags` for running ffmpeg/ffprobe. The installed app has no
+console of its own, so without this Windows opens a console window for every
+ffmpeg run (one flash per thumbnail, and a black window throughout export)."""
 
 
 class ExecutableNotFoundError(RuntimeError):

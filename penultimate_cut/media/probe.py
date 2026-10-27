@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
-from penultimate_cut.media.executables import ExecutableNotFoundError, locate
+from penultimate_cut.media.executables import NO_WINDOW, ExecutableNotFoundError, locate
 
 STILL_IMAGE_DURATION = Fraction(24 * 60 * 60)
 """Still images have no intrinsic duration. This stands in for "as long as you
@@ -180,6 +180,7 @@ def _ffprobe_json(path: Path) -> dict:
             capture_output=True,
             text=True,
             check=True,
+            creationflags=NO_WINDOW,
         )
     except subprocess.CalledProcessError as exc:
         raise ProbeError(f"{path}: ffprobe failed: {exc.stderr.strip()}") from exc

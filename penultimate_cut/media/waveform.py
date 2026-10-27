@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from penultimate_cut.media.cache import cache_dir_for
-from penultimate_cut.media.executables import ExecutableNotFoundError, locate
+from penultimate_cut.media.executables import NO_WINDOW, ExecutableNotFoundError, locate
 
 PEAKS_PER_SECOND = 50
 """Detail of the stored waveform: one pixel per peak at the timeline's
@@ -126,6 +126,7 @@ def _compute(media_path: Path, cancel_check: Callable[[], bool]) -> Waveform:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        creationflags=NO_WINDOW,
     )
     try:
         assert process.stdout is not None
