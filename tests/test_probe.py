@@ -48,6 +48,54 @@ def test_probe_still_image(make_still_image) -> None:
     assert info.height == 480
 
 
+@pytest.mark.parametrize("suffix", [".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".gif"])
+def test_probe_every_picture_format_as_a_still_image(media_dir: Path, suffix: str) -> None:
+    """JPEGs (and one-frame GIFs) report a duration of one frame; they're
+    still pictures, not 0.04-second videos."""
+    path = media_dir / f"format_check{suffix}"
+    _ffmpeg("-f", "lavfi", "-i", "testsrc2=s=320x240", "-frames:v", "1", str(path))
+    info = probe(path)
+    assert info.is_still_image
+    assert info.frame_rate is None
+    assert (info.width, info.height) == (320, 240)
+
+
+def test_probe_animated_gif_as_a_video(media_dir: Path) -> None:
+    path = media_dir / "animated.gif"
+    _ffmpeg("-f", "lavfi", "-i", "testsrc2=s=64x48:d=1", "-r", "10", str(path))
+    info = probe(path)
+    assert not info.is_still_image
+    assert abs(info.duration - Fraction(6, 5)) < Fraction(1, 5)
+
+
+def test_probe_reports_rotated_phone_photo_upright(media_dir: Path) -> None:
+    """A phone saves a portrait photo sideways, with an EXIF note saying to
+    turn it; the size must be the turned (upright) one."""
+    plain = media_dir / "sideways.jpg"
+    _ffmpeg("-f", "lavfi", "-i", "testsrc2=s=320x240", "-frames:v", "1", str(plain))
+    rotated = media_dir / "portrait.jpg"
+    rotated.write_bytes(_with_exif_orientation(plain.read_bytes(), 6))
+
+    info = probe(rotated)
+    assert info.is_still_image
+    assert (info.width, info.height) == (240, 320)
+
+
+def _ffmpeg(*args: str) -> None:
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *args], check=True)
+
+
+def _with_exif_orientation(jpeg: bytes, orientation: int) -> bytes:
+    """`jpeg` with an EXIF block holding just an Orientation tag (6 = turn
+    90 degrees clockwise to view, as phones write for portrait photos)."""
+    import struct
+
+    tiff = b"MM\x00\x2a" + struct.pack(">IH", 8, 1)
+    tiff += struct.pack(">HHIHH", 0x0112, 3, 1, orientation, 0) + struct.pack(">I", 0)
+    app1 = b"Exif\x00\x00" + tiff
+    return jpeg[:2] + b"\xff\xe1" + struct.pack(">H", len(app1) + 2) + app1 + jpeg[2:]
+
+
 def test_probe_missing_file_raises(tmp_path: Path) -> None:
     with pytest.raises(ProbeError):
         probe(tmp_path / "nope.mp4")

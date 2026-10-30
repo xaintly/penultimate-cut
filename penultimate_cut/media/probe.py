@@ -62,6 +62,8 @@ def probe(path: Path) -> MediaInfo:
 
     frame_rate = None if is_still_image or video_stream is None else _frame_rate(video_stream)
     width, height = _display_size(video_stream) if video_stream else (None, None)
+    if is_still_image and _picture_rotation(path) % 180 == 90:
+        width, height = height, width
 
     duration: Fraction
     if is_still_image:
@@ -84,12 +86,35 @@ def probe(path: Path) -> MediaInfo:
 
 
 def _is_still_image(data: dict, video_stream: dict) -> bool:
-    """A still image's video stream has no frame count or duration of its own
-    (unlike an animated gif, which does) and the container reports no overall
-    duration either."""
+    """Read by one of ffmpeg's single-picture readers: `image2` (which
+    JPEGs get, and which reports a 1-frame duration) or a `*_pipe` one
+    (PNG, BMP, WebP, TIFF...). A GIF is a picture only if it has one frame;
+    an animated one is a video. Otherwise, no duration or frame count
+    anywhere means a picture."""
+    format_name = data.get("format", {}).get("format_name", "")
+    if format_name == "image2" or format_name.endswith("_pipe"):
+        return True
+    if format_name == "gif":
+        return str(video_stream.get("nb_frames")) == "1"
     if "duration" in video_stream or "nb_frames" in video_stream:
         return False
     return "duration" not in data.get("format", {})
+
+
+def _picture_rotation(path: Path) -> int:
+    """Degrees a photo is turned (a phone's EXIF orientation), which ffprobe
+    only reports on the decoded frame, not on the stream; 0 if unknown."""
+    try:
+        result = subprocess.run(
+            [locate("ffprobe"), "-v", "error", "-select_streams", "v:0", "-show_frames",
+             "-read_intervals", "%+#1", "-show_entries", "frame_side_data", "-print_format",
+             "json", str(path)],
+            capture_output=True, text=True, check=True, creationflags=NO_WINDOW,
+        )  # fmt: skip
+        frames = json.loads(result.stdout).get("frames", [])
+    except (ExecutableNotFoundError, subprocess.CalledProcessError, json.JSONDecodeError):
+        return 0
+    return _rotation(frames[0]) if frames else 0
 
 
 def _display_size(video_stream: dict) -> tuple[int | None, int | None]:
@@ -107,7 +132,7 @@ def _display_size(video_stream: dict) -> tuple[int | None, int | None]:
 
 def _rotation(video_stream: dict) -> int:
     """Degrees, from the display matrix (current ffprobe) or the older
-    `rotate` tag; 0 if neither is there."""
+    `rotate` tag; 0 if neither is there. Also reads a frame's side data."""
     for side_data in video_stream.get("side_data_list", []):
         if "rotation" in side_data:
             try:
