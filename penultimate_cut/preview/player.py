@@ -11,7 +11,12 @@ real native window id (`int(widget.winId())`) to get actual video output.
 
 `load_unsafe_playlists` defaults to True because `preview/edl.py`'s gap
 filler uses `av://lavfi:...` entries, which mpv otherwise refuses to open.
-`mf-fps` is the rate pictures' image lists play at (see `PICTURE_FPS`).
+
+Those generated segments (gaps and pictures) can't be seeked backwards
+within (see `preview/edl.py`), so a seek into one reloads the timeline at
+the target instead -- about a third of a second, and checked live to land
+exactly -- unless it's forward within the segment already playing, which
+works as a plain seek.
 
 Verified empirically (not just from docs) that pitch-corrected speed change
 needs no extra configuration: `audio-pitch-correction` defaults to on, so
@@ -22,7 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from fractions import Fraction
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -31,7 +36,7 @@ from typing import Literal
 import mpv
 
 from penultimate_cut.model.time import format_seconds, fraction_from_seconds
-from penultimate_cut.preview.edl import PICTURE_FPS
+from penultimate_cut.preview.edl import Span
 
 FrameStepDirection = Literal["forward", "backward"]
 
@@ -54,7 +59,6 @@ class Player:
             # default unloads the file there and goes idle, after which play
             # and seek silently do nothing until the next edit reloads it.
             "keep_open": "yes",
-            "mf_fps": PICTURE_FPS,
         }
         if wid is not None:
             mpv_kwargs["wid"] = wid
@@ -80,6 +84,7 @@ class Player:
         mpv_kwargs.update(extra_mpv_options)
         self._mpv = mpv.MPV(**mpv_kwargs)
         self._edl_path: Path | None = None
+        self._generated: tuple[Span, ...] = ()
 
     def __enter__(self) -> Player:
         return self
@@ -94,12 +99,15 @@ class Player:
 
     # --- loading -----------------------------------------------------------
 
-    def load_edl(self, edl_text: str, start: Fraction = Fraction(0)) -> None:
+    def load_edl(
+        self, edl_text: str, start: Fraction = Fraction(0), generated: Iterable[Span] = ()
+    ) -> None:
         """Write `edl_text` to this player's scratch `.edl` file and load it,
         positioned at `start` -- so reloading after an edit can keep the
         playhead where it was, instead of jumping back to the beginning (a
         seek issued right after loading is dropped while the load is still
-        in flight, so this has to be part of the load itself).
+        in flight, so this has to be part of the load itself). `generated`
+        are its gaps' and pictures' spans (`edl.generated_spans`).
 
         Reuses the same file across calls (overwriting it) rather than
         making a new one per edit, since the EDL is regenerated after every
@@ -117,6 +125,7 @@ class Player:
             self._edl_path = Path(handle.name)
             handle.close()
         self._edl_path.write_text(edl_text, encoding="utf-8", newline="\n")
+        self._generated = tuple(generated)
         self._mpv.loadfile(str(self._edl_path), start=format_seconds(start))
 
     def set_filters(self, video: str, audio: str) -> None:
@@ -127,6 +136,7 @@ class Player:
 
     def unload(self) -> None:
         """Stop and show nothing -- e.g. when the timeline becomes empty."""
+        self._generated = ()
         with contextlib.suppress(SystemError):
             self._mpv.command("stop")
 
@@ -174,7 +184,7 @@ class Player:
         """Resume playback -- from the start, if it had reached the end."""
         with contextlib.suppress(SystemError):
             if self._mpv.eof_reached:
-                self._mpv.seek(0, reference="absolute", precision="exact")
+                self.seek(Fraction(0))
             self._mpv.pause = False
 
     def pause(self) -> None:
@@ -193,14 +203,33 @@ class Player:
         return not bool(self._mpv.pause)
 
     def seek(self, position: Fraction) -> None:
-        """Seek to an absolute position, frame-exact (hr-seek)."""
+        """Seek to an absolute position, frame-exact (hr-seek) -- or, into a
+        gap or picture, by reloading there (see the module docstring)."""
         with contextlib.suppress(SystemError):
-            self._mpv.seek(float(position), reference="absolute", precision="exact")
+            if self._needs_reload(position):
+                assert self._edl_path is not None
+                self._mpv.loadfile(str(self._edl_path), start=format_seconds(position))
+            else:
+                self._mpv.seek(float(position), reference="absolute", precision="exact")
+
+    def _needs_reload(self, position: Fraction) -> bool:
+        span = next((s for s in self._generated if s[0] <= position < s[1]), None)
+        if span is None or self._edl_path is None:
+            return False
+        current = self.position
+        playing_ahead = current is not None and span[0] <= current <= position
+        return not playing_ahead
 
     def frame_step(self, direction: FrameStepDirection = "forward") -> None:
         with contextlib.suppress(SystemError):
             if direction == "forward":
                 self._mpv.frame_step()
+                return
+            current = self.position
+            if current is not None and any(s[0] < current <= s[1] for s in self._generated):
+                # mpv's own step back is a backwards seek: not in a gap or picture.
+                fps = self._mpv.estimated_vf_fps or 30
+                self.seek(max(Fraction(0), current - 1 / fraction_from_seconds(fps)))
             else:
                 self._mpv.frame_back_step()
 

@@ -20,11 +20,22 @@ subtly wrong:
   real path or filter string can never be misread as EDL delimiters.
 - The lavfi device needs its output pads explicitly named `[out0]`, `[out1]`
   (not arbitrary names) when a graph has more than one unconnected output.
-- A still image can only be held from `start=0`; any nonzero `start` makes
-  mpv fail to open it (unlike a real gap's lavfi source, which can start
-  anywhere since it's infinite). `start` is forced to 0 for still-image
-  clips here regardless of the clip's own `source_in` (an image list
-  starts at its first frame too).
+
+Pictures (photos, and title cards drawn beforehand by `ui/titles.py`) are
+generated the same way: the picture, shrunk once to the preview's size,
+repeated at the project's frame rate, plus silence. Not as the plain image
+file: mpv shows that as one frame, so an exact seek into its middle skips
+to the next clip and a fade has no frames to animate; and with no sound of
+its own, mpv plays the next clip's sound early, out of sync. Not as an mpv
+image list (`mf://`) either, which seeks well but has no sound. All checked
+against a live libmpv, as was that the generated picture keeps a phone
+photo's EXIF rotation and that the escaping below survives file names full
+of `,;[]'%` and spaces.
+
+Generated segments have one weakness: mpv can't seek backwards within one
+(it ends up at the segment's end, and stays stuck there). `generated_spans`
+tells the player where they are, so it can reload at the target instead
+(see `Player.seek`).
 
 EDL has no per-segment filters, so clip volume/mute and fades are previewed
 by `preview_filters`: one video and one audio filter chain for the whole
@@ -33,18 +44,6 @@ Checked against a live libmpv: the filters see timeline time (a fade on the
 second clip lands at its start, also when playback starts mid-fade); audio
 switches within about 20 ms of a clip boundary, since it's filtered in
 chunks. Export applies the same settings per clip, exactly.
-
-Pictures -- photos, and title cards drawn beforehand by `ui/titles.py` --
-play as an image list (`mf://@list`) repeating the picture at
-`PICTURE_FPS` (see `preview/pictures.py`); `to_edl` takes the list for each
-picture's media. Not as a plain still image: mpv shows that as one frame at
-its start, so an exact seek into the middle skips past it (to the next
-clip) and a fade has no frames to animate. Nor as a looping lavfi `movie`
-source: after a seek backwards within it, every later seek into it lands
-at its end. Both checked against a live libmpv; the image list seeks to
-within a frame from anywhere, both ways, plays in real time, and keeps a
-photo's EXIF rotation. A photo without a list (an unusual format) still
-plays as a plain picture.
 
 EDL timestamps are plain floating-point seconds -- there's no way to carry
 our exact `Fraction` times through this format. That's fine for preview
@@ -62,6 +61,7 @@ from penultimate_cut.model.project import (
     Clip,
     Gap,
     Project,
+    Title,
     TrackItem,
     TrackKind,
     auto_resolution,
@@ -70,30 +70,43 @@ from penultimate_cut.model.time import format_seconds
 
 HEADER = "# mpv EDL v0"
 
-PICTURE_FPS = 10
-"""Frames per second of a picture's image list: the player's `mf-fps`."""
-
 _GAP_AUDIO_RATE = 48000
+
+Span = tuple[Fraction, Fraction]
 
 
 class EDLError(ValueError):
     """`project` can't be represented as an EDL (yet)."""
 
 
-def to_edl(project: Project, picture_lists: Mapping[str, Path] | None = None) -> str:
+def to_edl(project: Project, title_pictures: Mapping[Title, Path] | None = None) -> str:
     """Render `project` as mpv EDL text. Empty tracks are omitted.
-    `picture_lists` holds, by media id, the image list for each picture on
-    the timeline (see `preview/pictures.py`); every title card needs one."""
+    `title_pictures` holds the drawn picture of each title card on the
+    timeline (see `model.project.project_titles`)."""
     width, height = auto_resolution(project)
-    lists = picture_lists or {}
+    pictures = title_pictures or {}
     lines = [HEADER]
     for track in project.tracks:
         if not track.items:
             continue
         lines.append("!new_stream")
         for item in track.items:
-            lines.append(_item_line(item, track.kind, project.frame_rate, width, height, lists))
+            lines.append(_item_line(item, track.kind, project.frame_rate, width, height, pictures))
     return "\n".join(lines) + "\n"
+
+
+def generated_spans(project: Project) -> list[Span]:
+    """(start, end) timeline spans played from generated segments -- gaps
+    and pictures -- which mpv can't seek backwards within."""
+    spans = []
+    for track in project.tracks:
+        start = Fraction(0)
+        for item in track.items:
+            end = start + item.duration
+            if isinstance(item, Gap) or item.media_ref.is_still_image:
+                spans.append((start, end))
+            start = end
+    return spans
 
 
 def preview_filters(project: Project) -> tuple[str, str]:
@@ -139,28 +152,33 @@ def _item_line(
     project_rate: Fraction,
     width: int,
     height: int,
-    picture_lists: Mapping[str, Path],
+    title_pictures: Mapping[Title, Path],
 ) -> str:
     if isinstance(item, Gap):
         return _gap_line(item, track_kind, project_rate, width, height)
-    return _clip_line(item, picture_lists)
-
-
-def _clip_line(clip: Clip, picture_lists: Mapping[str, Path]) -> str:
-    if clip.speed != 1:
+    if item.speed != 1:
         raise EDLError("speed-changed clips can't be previewed via EDL yet")
-    start = Fraction(0) if clip.media_ref.is_still_image else clip.source_in
-    length = clip.source_out - clip.source_in
-    return _segment(_source(clip, picture_lists), start, length)
+    media = item.media_ref
+    if media.title is not None:
+        if media.title not in title_pictures:
+            raise EDLError("a title card hasn't been drawn yet")
+        return _picture_line(title_pictures[media.title], item, project_rate, width, height)
+    if media.is_still_image:
+        return _picture_line(media.path, item, project_rate, width, height)
+    return _segment(str(media.path), item.source_in, item.source_out - item.source_in)
 
 
-def _source(clip: Clip, picture_lists: Mapping[str, Path]) -> str:
-    media = clip.media_ref
-    if media.id in picture_lists:
-        return f"mf://@{picture_lists[media.id]}"
-    if media.is_title:
-        raise EDLError("a title card hasn't been drawn yet")
-    return str(media.path)
+def _picture_line(picture: Path, clip: Clip, rate: Fraction, width: int, height: int) -> str:
+    # Shrunk to fit a square of the preview's long side -- before any EXIF
+    # rotation, which mpv applies afterwards -- once, before it's repeated.
+    side = max(width, height)
+    movie = _graph_escape(f"movie=filename={_option_escape(picture.as_posix())}")
+    graph = (
+        f"{movie},scale={side}:{side}:force_original_aspect_ratio=decrease,"
+        f"loop=loop=-1:size=1,setpts=N*{rate.denominator}/{rate.numerator}/TB[out0];"
+        f"anullsrc=r={_GAP_AUDIO_RATE}:cl=stereo[out1]"
+    )
+    return _segment(f"av://lavfi:{graph}", Fraction(0), clip.duration)
 
 
 def _gap_line(
@@ -174,6 +192,16 @@ def _gap_line(
     else:
         graph = f"anullsrc=r={_GAP_AUDIO_RATE}:cl=stereo[out0]"
     return _segment(f"av://lavfi:{graph}", Fraction(0), gap.duration)
+
+
+def _option_escape(value: str) -> str:
+    """A filter option's value: `\\`, `:` and `'` backslash-escaped."""
+    return "".join("\\" + char if char in "\\:'" else char for char in value)
+
+
+def _graph_escape(value: str) -> str:
+    """A whole filter, within a filter graph: `\\'[],;` backslash-escaped."""
+    return "".join("\\" + char if char in "\\'[],;" else char for char in value)
 
 
 def _segment(file: str, start: Fraction, length: Fraction) -> str:

@@ -100,6 +100,5 @@ def title_image_file(title: Title, width: int, height: int) -> Path:
 
 def title_images(project: Project, width: int, height: int) -> dict[Title, Path]:
     """The picture of every title on the timeline, at `width`x`height` --
-    what `export.filtergraph.build_filtergraph` and
-    `preview.pictures.picture_lists` need."""
+    what `preview.edl.to_edl` and `export.filtergraph.build_filtergraph` need."""
     return {title: title_image_file(title, width, height) for title in project_titles(project)}

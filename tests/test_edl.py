@@ -13,7 +13,12 @@ from penultimate_cut.model.project import (
     Track,
     new_title_clip,
 )
-from penultimate_cut.preview.edl import PICTURE_FPS, EDLError, preview_filters, to_edl
+from penultimate_cut.preview.edl import (
+    EDLError,
+    generated_spans,
+    preview_filters,
+    to_edl,
+)
 
 
 def make_media(path: Path, *, width: int = 320, height: int = 240) -> MediaRef:
@@ -271,57 +276,75 @@ def test_preview_filters_fade_and_mute_live_playback(tmp_path: Path) -> None:
     assert max(abs(s) for s in second_clip) == 0  # muted
 
 
-def test_pictures_play_from_their_image_lists() -> None:
+def test_pictures_play_as_generated_segments_with_silence() -> None:
     title_clip = new_title_clip(Title(text="Hello"))
     photo = MediaRef(
-        path=Path("/photos/beach.jpg"),
+        path=Path("C:/My Photos, 2026/it's [one]; 100%.jpg"),
         relative_path=None,
         duration=Fraction(24 * 60 * 60),
         frame_rate=None,
         has_video=True,
         has_audio=False,
     )
-    photo_clip = Clip(media_ref=photo, source_in=Fraction(0), source_out=Fraction(3))
+    photo_clip = Clip(media_ref=photo, source_in=Fraction(4), source_out=Fraction(7))
     project = Project(
-        frame_rate=Fraction(30), tracks=[Track(kind="video", items=[title_clip, photo_clip])]
+        frame_rate=Fraction(30000, 1001),
+        tracks=[Track(kind="video", items=[title_clip, photo_clip])],
     )
-    title_list, photo_list = Path("/cache/a-101.txt"), Path("/cache/b-101.txt")
 
     with pytest.raises(EDLError):
         to_edl(project)  # the title has no picture yet
-    lines = to_edl(project, {title_clip.media_ref.id: title_list, photo.id: photo_list})
-    title_line, photo_line = lines.splitlines()[-2:]
+    edl = to_edl(project, {title_clip.media_ref.title: Path("C:/cache/title.png")})
+    title_line, photo_line = edl.splitlines()[-2:]
 
-    for line, listing, length in [(title_line, title_list, 5), (photo_line, photo_list, 3)]:
-        source = f"mf://@{listing}"
-        assert line == f"file=%{len(source)}%{source},start=0.000000,length={length}.000000"
-    # A photo without a list still plays as a plain picture.
-    plain_line = to_edl(project, {title_clip.media_ref.id: title_list}).splitlines()[-1]
-    assert f"%{photo.path}," in plain_line
+    # Escaped twice: as a filter option value, then as part of the graph.
+    assert r"movie=filename=C\\:/cache/title.png," in title_line
+    assert title_line.endswith(",start=0.000000,length=5.000000")
+    assert (
+        r"movie=filename=C\\:/My Photos\, 2026/it\\\'s \[one\]\; 100%.jpg"
+        ",scale=1280:1280:force_original_aspect_ratio=decrease,"
+        "loop=loop=-1:size=1,setpts=N*1001/30000/TB[out0];"
+        "anullsrc=r=48000:cl=stereo[out1]"
+    ) in photo_line
+    assert photo_line.endswith(",start=0.000000,length=3.000000")
 
 
-def test_photo_seeks_and_fades_in_live_playback(
-    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_generated_spans_are_the_gaps_and_pictures() -> None:
+    video = make_media(Path("/v.mp4"))
+    items = [
+        Clip(media_ref=video, source_in=Fraction(0), source_out=Fraction(2)),
+        Gap(duration=Fraction(1)),
+        new_title_clip(),
+        Clip(media_ref=video, source_in=Fraction(0), source_out=Fraction(1)),
+    ]
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=items)])
+    assert generated_spans(project) == [(Fraction(2), Fraction(3)), (Fraction(3), Fraction(8))]
+
+
+def test_photo_and_gap_play_seek_and_fade_live(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_video_clip
 ) -> None:
-    """Through the real Player: a seek into the middle of a photo stays
-    there (a plain still image would skip to the next clip), and its fade
-    in animates (a plain still image is one frame, black all the way). The
-    title after it plays from its own list."""
+    """Through the real Player, for [video][photo (fades in)][gap][title]:
+    the sound stays in sync through the photo; seeks into the photo and the
+    gap land where asked, also backwards within them (where mpv alone gets
+    stuck at the segment's end); and the photo's fade in animates."""
     import subprocess
 
     from PySide6.QtGui import QImage
 
-    from penultimate_cut.preview.pictures import picture_lists
     from penultimate_cut.preview.player import Player
     from penultimate_cut.ui.titles import title_images
 
     monkeypatch.setenv("PENULTIMATE_CUT_CACHE_DIR", str(tmp_path / "cache"))
-    white = tmp_path / "white.png"
+    folder = tmp_path / "My Photos, [2026]"
+    folder.mkdir()
+    white = folder / "it's white; 100%.png"
     subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=white:s=64x48",
          "-frames:v", "1", str(white)],
         check=True,
     )  # fmt: skip
+    video = make_media(make_video_clip("edl_live.mp4", duration=2.0, fps=30, size="64x48"))
     photo = MediaRef(
         path=white,
         relative_path=None,
@@ -332,20 +355,29 @@ def test_photo_seeks_and_fades_in_live_playback(
         width=64,
         height=48,
     )
-    clip = Clip(media_ref=photo, source_in=Fraction(0), source_out=Fraction(3), fade_in=True)
-    after = new_title_clip(Title(text="", background="#000000"))
-    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip, after])])
-    edl_text = to_edl(project, picture_lists(project, title_images(project, 64, 48)))
-    assert "mf://@" in edl_text.splitlines()[-1]  # the title too
+    items = [
+        Clip(media_ref=video, source_in=Fraction(0), source_out=Fraction(2)),
+        Clip(media_ref=photo, source_in=Fraction(0), source_out=Fraction(3), fade_in=True),
+        Gap(duration=Fraction(2)),
+        new_title_clip(Title(text="", background="#000000")),
+    ]
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=items)])
+    edl_text = to_edl(project, title_images(project, 64, 48))
+    spans = generated_spans(project)
 
-    player = Player()
+    player = Player(keep_open="yes")
     try:
-        player.load_edl(edl_text)
+        player.load_edl(edl_text, generated=spans)
+        assert player.wait_until_ready()
+        player.seek(Fraction(1))
+        player.play()
+        assert _wait_for(lambda: (player.position or 0) > Fraction(4), timeout=8)
+        audio = player._mpv.audio_pts
+        assert audio is not None and abs(audio - float(player.position or 0)) < 0.25
         player.pause()
-        assert _wait_for(lambda: player._mpv.duration is not None)
-        for target in (Fraction(2), Fraction(1, 2), Fraction(5, 2), Fraction(6)):
-            player.seek(target)
-            assert _wait_for(lambda t=target: player.position == t)
+        for target in (Fraction(4), Fraction(5, 2), Fraction(6), Fraction(11, 2), Fraction(3), 0):
+            player.seek(Fraction(target))
+            assert _wait_for(lambda t=target: _near(player.position, t)), (target, player.position)
     finally:
         player.close()
 
@@ -357,20 +389,27 @@ def test_photo_seeks_and_fades_in_live_playback(
         vo_image_format="png",
         untimed=True,
         keep_open="no",
+        start="2",
+        end="5",
     )
     try:
         player.set_filters(*preview_filters(project))
-        player.load_edl(edl_text)
+        player.load_edl(edl_text, start=Fraction(2))
         player._mpv.wait_for_playback()
     finally:
         player.close()
     frames = sorted(frames_dir.glob("*.png"))
     brightness = [QImage(str(f)).pixelColor(32, 24).red() for f in frames]
-    assert len(frames) == 3 * PICTURE_FPS + 5 * PICTURE_FPS
-    assert brightness[0] < 30  # black as it starts fading in...
-    assert 90 < brightness[PICTURE_FPS // 2] < 170  # ...half way after 0.5 s...
-    assert min(brightness[PICTURE_FPS + 1 : 3 * PICTURE_FPS]) > 240  # ...then white
-    assert max(brightness[3 * PICTURE_FPS :]) < 30  # the black title
+    # 3 s at 30 fps, give or take a frame at either end of the recording.
+    assert 85 <= len(frames) <= 91
+    assert brightness[0] < 30  # black as the photo starts fading in...
+    assert any(90 < b < 170 for b in brightness[10:20])  # ...half way after 0.5 s...
+    assert min(brightness[35:]) > 240  # ...then white
+
+
+def _near(position: Fraction | None, target: Fraction) -> bool:
+    """Within a frame: a seek into a gap or picture reloads, landing to the frame."""
+    return position is not None and abs(position - target) <= Fraction(1, 30)
 
 
 def _wait_for(condition, timeout: float = 5.0) -> bool:
