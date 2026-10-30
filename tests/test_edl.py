@@ -13,7 +13,7 @@ from penultimate_cut.model.project import (
     Track,
     new_title_clip,
 )
-from penultimate_cut.preview.edl import TITLE_FPS, EDLError, preview_filters, to_edl
+from penultimate_cut.preview.edl import PICTURE_FPS, EDLError, preview_filters, to_edl
 
 
 def make_media(path: Path, *, width: int = 320, height: int = 240) -> MediaRef:
@@ -271,50 +271,79 @@ def test_preview_filters_fade_and_mute_live_playback(tmp_path: Path) -> None:
     assert max(abs(s) for s in second_clip) == 0  # muted
 
 
-def test_title_plays_from_its_image_list() -> None:
-    title = Title(text="Hello")
-    project = Project(
-        frame_rate=Fraction(30), tracks=[Track(kind="video", items=[new_title_clip(title)])]
+def test_pictures_play_from_their_image_lists() -> None:
+    title_clip = new_title_clip(Title(text="Hello"))
+    photo = MediaRef(
+        path=Path("/photos/beach.jpg"),
+        relative_path=None,
+        duration=Fraction(24 * 60 * 60),
+        frame_rate=None,
+        has_video=True,
+        has_audio=False,
     )
-    listing = Path("/cache/titles/abc-51.txt")
+    photo_clip = Clip(media_ref=photo, source_in=Fraction(0), source_out=Fraction(3))
+    project = Project(
+        frame_rate=Fraction(30), tracks=[Track(kind="video", items=[title_clip, photo_clip])]
+    )
+    title_list, photo_list = Path("/cache/a-101.txt"), Path("/cache/b-101.txt")
 
     with pytest.raises(EDLError):
-        to_edl(project)  # not drawn yet
-    line = to_edl(project, {title: listing}).splitlines()[-1]
+        to_edl(project)  # the title has no picture yet
+    lines = to_edl(project, {title_clip.media_ref.id: title_list, photo.id: photo_list})
+    title_line, photo_line = lines.splitlines()[-2:]
 
-    source = f"mf://@{listing}"
-    assert line == f"file=%{len(source)}%{source},start=0.000000,length=5.000000"
+    for line, listing, length in [(title_line, title_list, 5), (photo_line, photo_list, 3)]:
+        source = f"mf://@{listing}"
+        assert line == f"file=%{len(source)}%{source},start=0.000000,length={length}.000000"
+    # A photo without a list still plays as a plain picture.
+    plain_line = to_edl(project, {title_clip.media_ref.id: title_list}).splitlines()[-1]
+    assert f"%{photo.path}," in plain_line
 
 
-def test_title_seeks_and_fades_in_live_playback(
+def test_photo_seeks_and_fades_in_live_playback(
     qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Through the real Player: a seek into the middle of a title stays
+    """Through the real Player: a seek into the middle of a photo stays
     there (a plain still image would skip to the next clip), and its fade
-    in animates (a plain still image is one frame, black all the way)."""
+    in animates (a plain still image is one frame, black all the way). The
+    title after it plays from its own list."""
+    import subprocess
+
     from PySide6.QtGui import QImage
 
+    from penultimate_cut.preview.pictures import picture_lists
     from penultimate_cut.preview.player import Player
-    from penultimate_cut.ui.titles import title_lists
+    from penultimate_cut.ui.titles import title_images
 
     monkeypatch.setenv("PENULTIMATE_CUT_CACHE_DIR", str(tmp_path / "cache"))
-    title = Title(text="", background="#ffffff")
-    clip = Clip(
-        media_ref=new_title_clip(title).media_ref,
-        source_in=Fraction(0),
-        source_out=Fraction(3),
-        fade_in=True,
+    white = tmp_path / "white.png"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=white:s=64x48",
+         "-frames:v", "1", str(white)],
+        check=True,
+    )  # fmt: skip
+    photo = MediaRef(
+        path=white,
+        relative_path=None,
+        duration=Fraction(24 * 60 * 60),
+        frame_rate=None,
+        has_video=True,
+        has_audio=False,
+        width=64,
+        height=48,
     )
+    clip = Clip(media_ref=photo, source_in=Fraction(0), source_out=Fraction(3), fade_in=True)
     after = new_title_clip(Title(text="", background="#000000"))
     project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip, after])])
-    edl_text = to_edl(project, title_lists(project, 64, 48))
+    edl_text = to_edl(project, picture_lists(project, title_images(project, 64, 48)))
+    assert "mf://@" in edl_text.splitlines()[-1]  # the title too
 
     player = Player()
     try:
         player.load_edl(edl_text)
         player.pause()
         assert _wait_for(lambda: player._mpv.duration is not None)
-        for target in (Fraction(2), Fraction(1, 2), Fraction(5, 2)):
+        for target in (Fraction(2), Fraction(1, 2), Fraction(5, 2), Fraction(6)):
             player.seek(target)
             assert _wait_for(lambda t=target: player.position == t)
     finally:
@@ -337,10 +366,11 @@ def test_title_seeks_and_fades_in_live_playback(
         player.close()
     frames = sorted(frames_dir.glob("*.png"))
     brightness = [QImage(str(f)).pixelColor(32, 24).red() for f in frames]
-    assert len(frames) == 3 * TITLE_FPS + 5 * TITLE_FPS
+    assert len(frames) == 3 * PICTURE_FPS + 5 * PICTURE_FPS
     assert brightness[0] < 30  # black as it starts fading in...
-    assert 90 < brightness[TITLE_FPS // 2] < 170  # ...half way after 0.5 s...
-    assert min(brightness[TITLE_FPS + 1 : 3 * TITLE_FPS]) > 220  # ...then white (shaded)
+    assert 90 < brightness[PICTURE_FPS // 2] < 170  # ...half way after 0.5 s...
+    assert min(brightness[PICTURE_FPS + 1 : 3 * PICTURE_FPS]) > 240  # ...then white
+    assert max(brightness[3 * PICTURE_FPS :]) < 30  # the black title
 
 
 def _wait_for(condition, timeout: float = 5.0) -> bool:

@@ -10,25 +10,20 @@ shrunk until every line fits with a margin around it. The background is
 the chosen color, a little lighter at the top and darker at the bottom.
 
 Pictures are kept on disk, named by the title and size, so an unchanged
-title is never drawn twice. The preview plays a list repeating the picture
-(see `preview/edl.py` for why), also kept on disk. Needs a running
-QGuiApplication.
+title is never drawn twice. Needs a running QGuiApplication.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import math
-from fractions import Fraction
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter
 
 from penultimate_cut.media.cache import cache_root
-from penultimate_cut.model.project import Clip, Project, Title, project_titles
-from penultimate_cut.preview.edl import TITLE_FPS
+from penultimate_cut.model.project import Project, Title, project_titles
 
 FONT_FAMILY = "Segoe UI"
 """Windows' own interface font; Qt substitutes a similar one elsewhere."""
@@ -38,9 +33,6 @@ _MARGIN_SHARE = 0.08
 """Space kept clear on every side, as a share of the width/height."""
 _SHADE = 115
 """How much lighter the top / darker the bottom of the background is (%)."""
-_LIST_STEP_SECONDS = 10
-"""Preview lists come in steps of this many seconds, so trimming a title
-a little doesn't need a new one."""
 
 
 def paint_title(painter: QPainter, rect: QRectF, title: Title) -> None:
@@ -106,34 +98,8 @@ def title_image_file(title: Title, width: int, height: int) -> Path:
     return path
 
 
-def title_list_file(title: Title, width: int, height: int, seconds: Fraction) -> Path:
-    """An mpv image list repeating `title`'s picture for at least `seconds`."""
-    steps = max(1, math.ceil(seconds / _LIST_STEP_SECONDS))
-    frames = steps * _LIST_STEP_SECONDS * TITLE_FPS + 1
-    picture = title_image_file(title, width, height)
-    path = picture.with_name(f"{picture.stem}-{frames}.txt")
-    if not path.exists():
-        partial = path.with_suffix(".partial")
-        partial.write_text(f"{picture}\n" * frames, encoding="utf-8")
-        partial.replace(path)
-    return path
-
-
-def title_lists(project: Project, width: int, height: int) -> dict[Title, Path]:
-    """An image list for every title on the timeline, at `width`x`height`,
-    as long as its longest clip -- what `preview.edl.to_edl` needs."""
-    longest: dict[Title, Fraction] = {}
-    for track in project.tracks:
-        for item in track.items:
-            if isinstance(item, Clip) and item.media_ref.title is not None:
-                title = item.media_ref.title
-                longest[title] = max(longest.get(title, Fraction(0)), item.duration)
-    return {
-        title: title_list_file(title, width, height, seconds) for title, seconds in longest.items()
-    }
-
-
 def title_images(project: Project, width: int, height: int) -> dict[Title, Path]:
     """The picture of every title on the timeline, at `width`x`height` --
-    what `preview.edl.to_edl` and `export.filtergraph.build_filtergraph` need."""
+    what `export.filtergraph.build_filtergraph` and
+    `preview.pictures.picture_lists` need."""
     return {title: title_image_file(title, width, height) for title in project_titles(project)}

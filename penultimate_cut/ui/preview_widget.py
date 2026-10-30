@@ -29,10 +29,11 @@ from PySide6.QtWidgets import (
 
 from penultimate_cut.model.project import Project, auto_resolution
 from penultimate_cut.preview.edl import preview_filters, to_edl
+from penultimate_cut.preview.pictures import picture_lists
 from penultimate_cut.preview.player import FrameStepDirection, Player
 from penultimate_cut.ui.format import format_duration, format_speed
 from penultimate_cut.ui.sliders import click_to_jump
-from penultimate_cut.ui.titles import title_lists
+from penultimate_cut.ui.titles import title_images
 
 PLAYBACK_SPEEDS: tuple[Fraction, ...] = tuple(
     Fraction(s) for s in ("0.1", "0.25", "0.5", "1", "1.5", "2", "4", "10")
@@ -165,7 +166,8 @@ class PreviewWidget(QWidget):
     def load_project(self, project: Project, start: Fraction = Fraction(0)) -> None:
         """Load `project` (paused), positioned at `start`."""
         self._player.set_filters(*preview_filters(project))
-        lists = title_lists(project, *auto_resolution(project))
+        titles = title_images(project, *auto_resolution(project))
+        lists = picture_lists(project, titles)
         self._player.load_edl(to_edl(project, lists), start=min(start, project.duration))
         # mpv starts playing a freshly loaded file immediately (its `pause`
         # property defaults to False and loading a new file doesn't change
