@@ -290,10 +290,10 @@ class MainWindow(QMainWindow):
         edit_menu.aboutToShow.connect(self._update_edit_actions)
 
         view_menu = self.menuBar().addMenu("&View")
-        zoom_in = view_menu.addAction("Zoom In")
+        zoom_in = view_menu.addAction("Zoom In on Timeline")
         zoom_in.setShortcut(QKeySequence("+"))
         zoom_in.triggered.connect(self.timeline.zoom_in)
-        zoom_out = view_menu.addAction("Zoom Out")
+        zoom_out = view_menu.addAction("Zoom Out on Timeline")
         zoom_out.setShortcut(QKeySequence("-"))
         zoom_out.triggered.connect(self.timeline.zoom_out)
 

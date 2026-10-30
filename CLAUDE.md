@@ -203,7 +203,7 @@ vendor/                  # ffmpeg.exe, ffprobe.exe, libmpv-2.dll (gitignored; fe
 | Home / End | Jump to start / end |
 
 Keys live on menu actions so the menus show them (**File**: Import Media…; **Edit**: Undo,
-Redo, Split, Delete Clip, Delete and Close Gap; **View**: Zoom In, Zoom Out; **Play**: Play /
+Redo, Split, Delete Clip, Delete and Close Gap; **View**: Zoom In/Out on Timeline; **Play**: Play /
 Pause, Faster, Playback Speed ▸ 0.1×–10×, frame/second steps, Go to Start/End; **Help**:
 About). Only Delete and Shift+Delete are plain shortcuts. No reverse
 play (J) or separate pause (K): clicking the timeline or stepping back covers it.

@@ -41,13 +41,13 @@ def test_view_and_help_menus(qapp) -> None:
         }
         assert list(menus) == ["&File", "&Edit", "&View", "&Play", "&Help"]
         view = {a.text(): a for a in menus["&View"].actions()}
-        assert view["Zoom In"].shortcut().toString() == "+"
-        assert view["Zoom Out"].shortcut().toString() == "-"
+        assert view["Zoom In on Timeline"].shortcut().toString() == "+"
+        assert view["Zoom Out on Timeline"].shortcut().toString() == "-"
 
         baseline = window.timeline._canvas._view.pixels_per_second
-        view["Zoom In"].trigger()
+        view["Zoom In on Timeline"].trigger()
         assert window.timeline._canvas._view.pixels_per_second > baseline
-        view["Zoom Out"].trigger()
+        view["Zoom Out on Timeline"].trigger()
         assert window.timeline._canvas._view.pixels_per_second == baseline
 
         assert [a.text() for a in menus["&Help"].actions()] == ["About Penultimate Cut"]

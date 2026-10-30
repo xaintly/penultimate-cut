@@ -40,6 +40,39 @@ connection, and nothing is uploaded.
   outgrow this one. It saves your work automatically, and if a video file has
   moved it helps you find it again.
 
+## Keyboard and mouse shortcuts
+
+Everything also appears in the menus, so you don't need to memorize any of
+these.
+
+| Key | Action |
+|---|---|
+| Space | Play / pause (when playing faster, returns to normal speed) |
+| L | Play faster: 1.5×, 2×, 4×, 10× |
+| ← / → | Previous / next frame |
+| Shift+← / Shift+→ | Back / forward 1 second |
+| Home / End | Go to start / end |
+| S | Split at the playhead |
+| Delete | Delete the selected clip, leaving empty space |
+| Shift+Delete | Delete the selected clip and close the gap |
+| + / − | Zoom the timeline in / out |
+| Ctrl+Z / Ctrl+Y | Undo / redo |
+| Ctrl+I | Import media |
+| Ctrl+E | Export video |
+| Ctrl+N / Ctrl+O | New / open project |
+| Ctrl+S / Ctrl+Shift+S | Save / save as |
+
+| On the timeline | Action |
+|---|---|
+| Click or drag in the time ruler | Move the playhead |
+| Click a clip | Select it and move the playhead there |
+| Drag a clip | Move it |
+| Drag a clip's edge | Trim it |
+| Mouse wheel | Zoom in / out around the pointer |
+| Shift+wheel, or right-click and drag | Scroll |
+| Right-click | More options (delete clip, delete empty space, …) |
+| Hover over a clip | See where it came from and how long it is |
+
 ## What it isn't
 
 Penultimate Cut has no tools or modes to switch between. You split a clip at
