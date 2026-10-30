@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QMimeData, QObject, QPoint, QSize, Qt, Signal
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
     QListWidget,
@@ -225,7 +225,7 @@ class MediaBin(QWidget):
         if entry.media_ref.id in self._entries:
             return
         self._entries[entry.media_ref.id] = entry
-        icon = QIcon(str(entry.thumbnail_path)) if entry.thumbnail_path else self._audio_icon()
+        icon = thumbnail_icon(entry.thumbnail_path) if entry.thumbnail_path else self._audio_icon()
         item = QListWidgetItem(icon, _label_for(entry.media_ref))
         item.setData(Qt.ItemDataRole.UserRole, entry.media_ref.id)
         self._list.addItem(item)
@@ -276,3 +276,22 @@ def _label_for(media_ref: MediaRef) -> str:
     if media_ref.is_still_image:
         return f"{name}\nImage"
     return f"{name}\n{format_duration(media_ref.duration)}"
+
+
+def thumbnail_icon(path: Path) -> QIcon:
+    """The thumbnail at its own shape, centered in the icon's box. A plain
+    `QIcon(path)` stretches it to fill the box, squashing vertical video and
+    portrait photos."""
+    picture = QPixmap(str(path)).scaled(
+        QSize(*_ICON_SIZE),
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    canvas = QPixmap(*_ICON_SIZE)
+    canvas.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(canvas)
+    painter.drawPixmap(
+        (canvas.width() - picture.width()) // 2, (canvas.height() - picture.height()) // 2, picture
+    )
+    painter.end()
+    return QIcon(canvas)

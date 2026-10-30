@@ -2,11 +2,17 @@ import time
 from fractions import Fraction
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QSize, QUrl
 from PySide6.QtWidgets import QListWidget
 
 from penultimate_cut.model.project import MediaRef
-from penultimate_cut.ui.media_bin import MEDIA_MIME_TYPE, MediaBin, MediaBinEntry
+from penultimate_cut.ui.media_bin import (
+    _ICON_SIZE,
+    MEDIA_MIME_TYPE,
+    MediaBin,
+    MediaBinEntry,
+    thumbnail_icon,
+)
 
 
 def pump_until(app, condition, timeout: float = 8.0) -> bool:
@@ -274,3 +280,19 @@ def test_get_looks_up_an_entry_by_media_id(qapp, make_video_clip) -> None:
 def test_shutdown_is_safe_to_call(qapp) -> None:
     media_bin = MediaBin()
     media_bin.shutdown()  # must not raise or hang
+
+
+def test_thumbnail_icons_keep_the_pictures_shape(qapp, make_still_image) -> None:
+    """A portrait photo (or vertical video) is shown narrow and centered in
+    the icon's landscape box, not stretched across it."""
+    portrait = thumbnail_icon(make_still_image("mb_portrait.png", size="240x320"))
+    image = portrait.pixmap(QSize(*_ICON_SIZE)).toImage()
+    assert (image.width(), image.height()) == _ICON_SIZE
+    middle = image.pixelColor(_ICON_SIZE[0] // 2, _ICON_SIZE[1] // 2)
+    assert middle.alpha() == 255 and middle.blue() > 200  # the (blue) picture...
+    assert image.pixelColor(5, _ICON_SIZE[1] // 2).alpha() == 0  # ...with clear space beside it
+    assert image.pixelColor(_ICON_SIZE[0] - 5, _ICON_SIZE[1] // 2).alpha() == 0
+
+    landscape = thumbnail_icon(make_still_image("mb_landscape.png", size="320x180"))
+    edge = landscape.pixmap(QSize(*_ICON_SIZE)).toImage().pixelColor(2, _ICON_SIZE[1] // 2)
+    assert edge.alpha() == 255  # fills the width
