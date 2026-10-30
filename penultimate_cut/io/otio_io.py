@@ -12,6 +12,10 @@ file**, recomputed at save time. On load, the relative path is tried first,
 then the absolute path; neither existing on disk is reported back as
 `LoadResult.missing_media` for the caller (UI) to offer a relink flow for —
 this module never prompts.
+
+A title card has no file: it's written as an OTIO `GeneratorReference`
+(kind `TITLE_GENERATOR_KIND`) whose parameters are the title's text and
+colors. Other apps see a generated clip of the right length.
 """
 
 from __future__ import annotations
@@ -32,14 +36,16 @@ from penultimate_cut.model.project import (
     Gap,
     MediaRef,
     Project,
+    Title,
     Track,
     TrackItem,
     TrackKind,
+    title_media,
 )
 from penultimate_cut.model.time import Rate, frame_to_seconds, seconds_to_frame
 
 METADATA_KEY = "penultimate_cut"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 """Version history (bump + add a migration in `_migrate` on every change):
 
 1. Initial.
@@ -47,12 +53,15 @@ SCHEMA_VERSION = 3
    pixels applied -- see media/probe.py), not the stored frame size.
 3. Clip `volume` is a percentage (was `volume_db`, converted in
    `_clip_from_otio`); clips gain `fade_in`/`fade_out` (absent = off).
+4. Title cards (`GeneratorReference` media). Nothing to migrate.
 """
 
 _ADAPTER_NAME = "otio_json"
 """Passed explicitly rather than left for OTIO to guess from the file's
 extension: the autosave path is `<project>.otio.autosave`, whose actual
 extension (`.autosave`) OTIO has no adapter for."""
+
+TITLE_GENERATOR_KIND = "PenultimateCutTitle"
 
 _FALLBACK_RATE = Fraction(30)
 """Nominal rate used only to pick a `RationalTime` value for media with no frame rate
@@ -252,7 +261,7 @@ def _clip_to_otio(clip: Clip, path: Path) -> otio.schema.Clip:
         duration=_to_rational_time(clip.source_out - clip.source_in, rate),
     )
     otio_clip = otio.schema.Clip(
-        name=clip.media_ref.path.name,
+        name=clip.media_ref.display_name,
         media_reference=media_reference,
         source_range=source_range,
     )
@@ -309,9 +318,24 @@ def _volume_from_meta(meta: dict) -> int:
 # --- MediaRef -------------------------------------------------------------------
 
 
-def _media_ref_to_otio(media_ref: MediaRef, path: Path) -> otio.schema.ExternalReference:
-    relative_path = _relative_to(media_ref.path, path)
-    ref = otio.schema.ExternalReference(target_url=str(media_ref.path))
+def _media_ref_to_otio(
+    media_ref: MediaRef, path: Path
+) -> otio.schema.ExternalReference | otio.schema.GeneratorReference:
+    ref: otio.schema.ExternalReference | otio.schema.GeneratorReference
+    if media_ref.title is not None:
+        ref = otio.schema.GeneratorReference(
+            name="Title",
+            generator_kind=TITLE_GENERATOR_KIND,
+            parameters={
+                "text": media_ref.title.text,
+                "background": media_ref.title.background,
+                "text_color": media_ref.title.text_color,
+            },
+        )
+        relative_path = None
+    else:
+        relative_path = _relative_to(media_ref.path, path)
+        ref = otio.schema.ExternalReference(target_url=str(media_ref.path))
     ref.metadata[METADATA_KEY] = {
         "media_id": media_ref.id,
         "relative_path": relative_path,
@@ -331,10 +355,14 @@ def _media_ref_to_otio(media_ref: MediaRef, path: Path) -> otio.schema.ExternalR
 
 
 def _media_ref_from_otio(
-    ref: otio.schema.ExternalReference, path: Path, cache: dict[str, tuple[MediaRef, bool]]
+    ref: otio.schema.ExternalReference | otio.schema.GeneratorReference,
+    path: Path,
+    cache: dict[str, tuple[MediaRef, bool]],
 ) -> tuple[MediaRef, bool]:
     meta = ref.metadata.get(METADATA_KEY, {})
     media_id = meta.get("media_id")
+    if isinstance(ref, otio.schema.GeneratorReference):
+        return _title_from_otio(ref, media_id), True
     cache_key = media_id or ref.target_url
     if cache_key in cache:
         return cache[cache_key]
@@ -370,6 +398,23 @@ def _media_ref_from_otio(
     )
     cache[cache_key] = (media_ref, found)
     return media_ref, found
+
+
+def _title_from_otio(ref: otio.schema.GeneratorReference, media_id: str | None) -> MediaRef:
+    if ref.generator_kind != TITLE_GENERATOR_KIND:
+        raise ValueError(f"unsupported generated media: {ref.generator_kind or 'unknown'}")
+    params = ref.parameters
+    defaults = Title()
+    media_ref = title_media(
+        Title(
+            text=str(params.get("text", defaults.text)),
+            background=str(params.get("background", defaults.background)),
+            text_color=str(params.get("text_color", defaults.text_color)),
+        )
+    )
+    if media_id:
+        media_ref.id = media_id
+    return media_ref
 
 
 def _relative_to(target: Path, project_path: Path) -> str | None:

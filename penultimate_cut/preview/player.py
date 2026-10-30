@@ -11,6 +11,7 @@ real native window id (`int(widget.winId())`) to get actual video output.
 
 `load_unsafe_playlists` defaults to True because `preview/edl.py`'s gap
 filler uses `av://lavfi:...` entries, which mpv otherwise refuses to open.
+`mf-fps` is the rate title cards' image lists play at (see `TITLE_FPS`).
 
 Verified empirically (not just from docs) that pitch-corrected speed change
 needs no extra configuration: `audio-pitch-correction` defaults to on, so
@@ -30,6 +31,7 @@ from typing import Literal
 import mpv
 
 from penultimate_cut.model.time import format_seconds, fraction_from_seconds
+from penultimate_cut.preview.edl import TITLE_FPS
 
 FrameStepDirection = Literal["forward", "backward"]
 
@@ -52,6 +54,7 @@ class Player:
             # default unloads the file there and goes idle, after which play
             # and seek silently do nothing until the next edit reloads it.
             "keep_open": "yes",
+            "mf_fps": TITLE_FPS,
         }
         if wid is not None:
             mpv_kwargs["wid"] = wid

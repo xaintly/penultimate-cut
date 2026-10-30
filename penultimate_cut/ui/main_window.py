@@ -24,7 +24,10 @@ real widgets together:
 - Timeline selection -> the clip properties panel displays that clip (or
   clears itself for a gap or no selection); the panel's own Fit Mode
   control -> a `SetFitModeCommand`, and its volume/mute/fade controls -> a
-  `SetClipOptionsCommand`, for whichever clip is selected.
+  `SetClipOptionsCommand`, for whichever clip is selected; a title's text
+  and colors -> a `SetTitleCommand` for the clip they were typed into.
+- Add Title (button, Edit menu) -> a title card inserted before whatever is
+  under the playhead (or at the end), selected, with its text ready to type.
 - Export button -> a modal `ExportDialog` for the current project.
 - File menu: New/Open/Save/Save As, each going through
   `_confirm_discard_if_dirty()` first if there are unsaved changes (tracked
@@ -84,6 +87,7 @@ from penultimate_cut.commands.timeline_commands import (
     RemoveMediaCommand,
     SetClipOptionsCommand,
     SetFitModeCommand,
+    SetTitleCommand,
 )
 from penultimate_cut.io.autosave import (
     discard_autosave,
@@ -97,7 +101,16 @@ from penultimate_cut.io.otio_io import (
     load_project,
     save_project,
 )
-from penultimate_cut.model.project import Clip, FitMode, MediaRef, Project, Track, default_clip_for
+from penultimate_cut.model.project import (
+    Clip,
+    FitMode,
+    MediaRef,
+    Project,
+    Title,
+    Track,
+    default_clip_for,
+    new_title_clip,
+)
 from penultimate_cut.ui.about_dialog import AboutDialog
 from penultimate_cut.ui.clip_properties import ClipPropertiesPanel
 from penultimate_cut.ui.export_dialog import ExportDialog
@@ -157,14 +170,16 @@ class MainWindow(QMainWindow):
             "Delete the selected clip, leaving empty space (Delete).\n"
             "Shift+Delete also closes the gap.",
         )
-        self._add_title_button = _toolbar_button(Icon.InsertText, "Add Title", "Add a title")
-        self._add_title_button.hide()  # titles are Phase 2; nothing to do yet
+        self._add_title_button = _toolbar_button(
+            Icon.FormatJustifyCenter, "Add Title", "Add a title card at the playhead (Ctrl+T)"
+        )
         self._export_button = _toolbar_button(
             Icon.DocumentSaveAs, "Export", "Make the finished video file (Ctrl+E)"
         )
         self._import_button.clicked.connect(self.media_bin.choose_files)
         self._split_button.clicked.connect(self.timeline.split_at_playhead)
         self._delete_button.clicked.connect(lambda: self.timeline.delete_selected(ripple=False))
+        self._add_title_button.clicked.connect(self._add_title)
         self._export_button.clicked.connect(self._open_export_dialog)
 
         button_bar = QHBoxLayout()
@@ -206,6 +221,7 @@ class MainWindow(QMainWindow):
         self.timeline.selection_changed.connect(self._on_timeline_selection_changed)
         self.clip_properties.fit_mode_changed.connect(self._on_fit_mode_changed)
         self.clip_properties.options_changed.connect(self._on_clip_options_changed)
+        self.clip_properties.title_changed.connect(self._on_title_changed)
 
         self._init_shortcuts()
         self._update_window_title()
@@ -287,6 +303,10 @@ class MainWindow(QMainWindow):
         self._close_gap_action.triggered.connect(
             lambda: self.timeline.delete_clip_at_playhead(close_gap=True)
         )
+        edit_menu.addSeparator()
+        add_title = edit_menu.addAction("Add Title")
+        add_title.setShortcut(QKeySequence("Ctrl+T"))
+        add_title.triggered.connect(self._add_title)
         edit_menu.aboutToShow.connect(self._update_edit_actions)
 
         view_menu = self.menuBar().addMenu("&View")
@@ -546,7 +566,12 @@ class MainWindow(QMainWindow):
         seen: set[str] = set()
         for track in project.tracks:
             for item in track.items:
-                if isinstance(item, Clip) and item.media_ref.id not in seen:
+                # Titles aren't media files; they live only on the timeline.
+                if (
+                    isinstance(item, Clip)
+                    and not item.media_ref.is_title
+                    and item.media_ref.id not in seen
+                ):
                     seen.add(item.media_ref.id)
                     self.media_bin.add_media_ref(item.media_ref)
 
@@ -645,6 +670,22 @@ class MainWindow(QMainWindow):
         self.undo_stack.push(
             SetClipOptionsCommand(text, self.project, 0, self._selected_index, **options)
         )
+
+    def _on_title_changed(self, text: str, clip_id: str, title: Title, typing: bool) -> None:
+        items = self.project.tracks[0].items
+        index = next((i for i, item in enumerate(items) if item.id == clip_id), None)
+        if index is not None:
+            self.undo_stack.push(
+                SetTitleCommand(text, self.project, 0, index, title, typing=typing)
+            )
+
+    def _add_title(self) -> None:
+        index = self.timeline.index_at_playhead()
+        self.timeline.insert_clip(new_title_clip(), index, "Add title")
+        items = self.project.tracks[0].items
+        self._jump_to(sum((item.duration for item in items[:index]), Fraction(0)))
+        self.timeline.select(index)
+        self.clip_properties.edit_title_text()
 
     def _open_export_dialog(self) -> None:
         self._autosave()

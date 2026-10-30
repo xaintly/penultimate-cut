@@ -52,7 +52,7 @@ If something seems missing, propose it in a note; don't implement it.
 | Language | **Python 3.12+** | Fastest iteration; owner has a dev background but hasn't coded professionally in a decade. Heavy lifting is done by mpv and ffmpeg, so Python's speed isn't the bottleneck. |
 | UI toolkit | **PySide6 (Qt 6)** | Mature native-feeling Windows widgets, custom painting for the timeline, built-in `QUndoStack`. |
 | Preview playback | **libmpv** via `python-mpv`, embedded in a `QWidget` (`wid` option) | Exact seeking (`hr-seek`), frame stepping, speed changes with pitch correction (`scaletempo2`), reads essentially every format including old AVI/WMV. |
-| Timeline preview | **mpv EDL** (`edl://` / `# mpv EDL v0`) regenerated after each edit | Lets mpv play the cut list as one seamless stream without rendering. Effects that EDL can't express (transitions, titles, blur) are previewed in Phase 2+ via a short background render of the affected region. |
+| Timeline preview | **mpv EDL** (`edl://` / `# mpv EDL v0`) regenerated after each edit | Lets mpv play the cut list as one seamless stream without rendering. Effects that EDL can't express (transitions, captions, blur) are previewed in Phase 2+ via a short background render of the affected region. Title cards are drawn as pictures and play as an image list (`mf://`); see `preview/edl.py`. |
 | Probing / thumbnails / waveforms / export | **ffmpeg + ffprobe** (bundled executables, called via `subprocess`) | Universal decoder; filtergraphs cover every planned feature. |
 | Project file | **OpenTimelineIO (`.otio`)** via the `opentimelineio` Python package | Open standard (Academy Software Foundation). DaVinci Resolve and other tools can import OTIO, so a user can "graduate" a project to a bigger app. App-only features are stored in OTIO `metadata` under the `penultimate_cut` namespace; other apps ignore it but still get the cut. |
 | Packaging | **PyInstaller (one-folder)** + **Inno Setup** installer | Produces a normal Windows installer and `.exe`. Bundle `ffmpeg.exe`, `ffprobe.exe`, `libmpv-2.dll`. |
@@ -117,7 +117,8 @@ penultimate_cut/
     media_bin.py
     timeline/            # custom-painted timeline widget
     preview_widget.py
-    clip_properties.py   # per-clip panel (fit mode, volume, mute, fades; later speed, rotate)
+    clip_properties.py   # per-clip panel (fit mode, volume, mute, fades, title text/colors; later speed, rotate)
+    titles.py            # draws title cards (Qt) as pictures for preview and export
     export_dialog.py
 tests/
   conftest.py            # generates synthetic test media with ffmpeg lavfi
@@ -169,7 +170,7 @@ vendor/                  # ffmpeg.exe, ffprobe.exe, libmpv-2.dll (gitignored; fe
 
 - Main window: **preview** (top), **media bin** (left or top-left), **timeline**
   (bottom), and a slim bar of labeled buttons on top of the timeline: Import, Split,
-  Delete, Add Title, Export. (Add Title stays hidden until titles exist, in Phase 2.)
+  Delete, Add Title, Export.
 - Icons (these buttons, the preview's icon-only play controls) come from Windows' own
   icon font through Qt's theme icons (`QIcon.ThemeIcon`, Qt 6.7+), so there are no
   image files to ship. The app icon is `penultimate_cut/resources/icon.png`; run
@@ -198,12 +199,13 @@ vendor/                  # ffmpeg.exe, ffprobe.exe, libmpv-2.dll (gitignored; fe
 | + / − | Zoom timeline in / out (around the playhead) |
 | Mouse wheel | Zoom timeline around the pointer; Shift+wheel scrolls |
 | Ctrl+I | Import media |
+| Ctrl+T | Add a title card at the playhead |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Ctrl+S | Save |
 | Home / End | Jump to start / end |
 
 Keys live on menu actions so the menus show them (**File**: Import Media…; **Edit**: Undo,
-Redo, Split, Delete Clip, Delete and Close Gap; **View**: Zoom In/Out on Timeline; **Play**: Play /
+Redo, Split, Delete Clip, Delete and Close Gap, Add Title; **View**: Zoom In/Out on Timeline; **Play**: Play /
 Pause, Faster, Playback Speed ▸ 0.1×–10×, frame/second steps, Go to Start/End; **Help**:
 About). Only Delete and Shift+Delete are plain shortcuts. No reverse
 play (J) or separate pause (K): clicking the timeline or stepping back covers it.
@@ -294,6 +296,15 @@ This plays in every browser, LMS, and media player that matters.
   them with one whole-timeline mpv filter chain switched on per clip span
   (`preview/edl.py: preview_filters`); export applies them per clip segment.
 - An empty timeline shows "Drag videos here, or click Import".
+- Also pulled in for 1.0: **title cards** (Add Title, Ctrl+T). A full-screen card of
+  centered text on a color (default dark blue `#012456`, white text, a soft shadow, a
+  slight top-to-bottom shade), 5 s, fading in and out. Inserted before whatever is under
+  the playhead (at the end once past everything), then selected with its text ready to
+  type. Text and the two colors are edited in the clip properties panel; typing is applied
+  a pause at a time and undoes as one step. Otherwise a title is a still image: trim,
+  split, move, delete, and fades all work unchanged. Model: `MediaRef.title` (a frozen
+  `Title`); saved as an OTIO `GeneratorReference`. Drawn by Qt (`ui/titles.py`) at the
+  output size, the same picture for preview and export; text shrinks to fit.
 
 **Phase 1 is done when** the owner can take a narrated slideshow plus two phone clips,
 cut and rearrange them, and export a small MP4 that plays in a browser — without
@@ -308,8 +319,8 @@ reading any instructions.
 - **Normalize loudness** across the whole project (ffmpeg `loudnorm`, two-pass) —
   for group projects merged from several contributors.
 - **Transitions** between clips: cross-dissolve and fade-through-black only.
-- **Titles** (full-screen card before/after a clip), **captions** (text over a clip),
-  **credits** (end card). A few clean built-in styles; font, size, color, position.
+- **Captions** (text over a clip) and scrolling **credits**; more title options (a few
+  clean built-in styles; font, size, position) on top of 1.0's basic title cards.
 - **Speed change with pitch correction** per clip, plus **"Fit to length…"**: enter a
   target total duration (e.g. 5:00–8:00) and the app computes and applies one uniform
   speed factor (with a warning above ~1.25× or below ~0.8×).

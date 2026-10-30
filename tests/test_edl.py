@@ -4,8 +4,16 @@ from pathlib import Path
 import mpv
 import pytest
 
-from penultimate_cut.model.project import Clip, Gap, MediaRef, Project, Track
-from penultimate_cut.preview.edl import EDLError, preview_filters, to_edl
+from penultimate_cut.model.project import (
+    Clip,
+    Gap,
+    MediaRef,
+    Project,
+    Title,
+    Track,
+    new_title_clip,
+)
+from penultimate_cut.preview.edl import TITLE_FPS, EDLError, preview_filters, to_edl
 
 
 def make_media(path: Path, *, width: int = 320, height: int = 240) -> MediaRef:
@@ -261,3 +269,86 @@ def test_preview_filters_fade_and_mute_live_playback(tmp_path: Path) -> None:
     second_clip = samples[rate * channels * 21 // 10 :]  # from 2.1 s
     assert max(abs(s) for s in first_clip) > 1000
     assert max(abs(s) for s in second_clip) == 0  # muted
+
+
+def test_title_plays_from_its_image_list() -> None:
+    title = Title(text="Hello")
+    project = Project(
+        frame_rate=Fraction(30), tracks=[Track(kind="video", items=[new_title_clip(title)])]
+    )
+    listing = Path("/cache/titles/abc-51.txt")
+
+    with pytest.raises(EDLError):
+        to_edl(project)  # not drawn yet
+    line = to_edl(project, {title: listing}).splitlines()[-1]
+
+    source = f"mf://@{listing}"
+    assert line == f"file=%{len(source)}%{source},start=0.000000,length=5.000000"
+
+
+def test_title_seeks_and_fades_in_live_playback(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the real Player: a seek into the middle of a title stays
+    there (a plain still image would skip to the next clip), and its fade
+    in animates (a plain still image is one frame, black all the way)."""
+    from PySide6.QtGui import QImage
+
+    from penultimate_cut.preview.player import Player
+    from penultimate_cut.ui.titles import title_lists
+
+    monkeypatch.setenv("PENULTIMATE_CUT_CACHE_DIR", str(tmp_path / "cache"))
+    title = Title(text="", background="#ffffff")
+    clip = Clip(
+        media_ref=new_title_clip(title).media_ref,
+        source_in=Fraction(0),
+        source_out=Fraction(3),
+        fade_in=True,
+    )
+    after = new_title_clip(Title(text="", background="#000000"))
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip, after])])
+    edl_text = to_edl(project, title_lists(project, 64, 48))
+
+    player = Player()
+    try:
+        player.load_edl(edl_text)
+        player.pause()
+        assert _wait_for(lambda: player._mpv.duration is not None)
+        for target in (Fraction(2), Fraction(1, 2), Fraction(5, 2)):
+            player.seek(target)
+            assert _wait_for(lambda t=target: player.position == t)
+    finally:
+        player.close()
+
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    player = Player(
+        vo="image",
+        vo_image_outdir=str(frames_dir),
+        vo_image_format="png",
+        untimed=True,
+        keep_open="no",
+    )
+    try:
+        player.set_filters(*preview_filters(project))
+        player.load_edl(edl_text)
+        player._mpv.wait_for_playback()
+    finally:
+        player.close()
+    frames = sorted(frames_dir.glob("*.png"))
+    brightness = [QImage(str(f)).pixelColor(32, 24).red() for f in frames]
+    assert len(frames) == 3 * TITLE_FPS + 5 * TITLE_FPS
+    assert brightness[0] < 30  # black as it starts fading in...
+    assert 90 < brightness[TITLE_FPS // 2] < 170  # ...half way after 0.5 s...
+    assert min(brightness[TITLE_FPS + 1 : 3 * TITLE_FPS]) > 220  # ...then white (shaded)
+
+
+def _wait_for(condition, timeout: float = 5.0) -> bool:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.05)
+    return False

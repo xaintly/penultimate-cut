@@ -1,8 +1,12 @@
+import time
 from fractions import Fraction
 from pathlib import Path
 
-from penultimate_cut.model.project import Clip, MediaRef
-from penultimate_cut.ui.clip_properties import ClipPropertiesPanel
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QColorDialog
+
+from penultimate_cut.model.project import Clip, MediaRef, Title, new_title_clip
+from penultimate_cut.ui.clip_properties import TITLE_TYPING_PAUSE_MS, ClipPropertiesPanel
 
 
 def make_clip(name: str = "a.mp4", *, has_video: bool = True, has_audio: bool = True) -> Clip:
@@ -144,3 +148,75 @@ def test_clip_without_sound_disables_volume_and_mute_but_not_fades(qapp) -> None
     assert not panel._mute_box.isEnabled()
     assert panel._volume_label.text() == ""
     assert panel._fade_in_box.isEnabled() and panel._fade_out_box.isEnabled()
+
+
+def wait_for_typing_pause(qapp) -> None:
+    deadline = time.monotonic() + TITLE_TYPING_PAUSE_MS / 1000 + 2
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.02)
+
+
+def test_title_shows_text_and_colors_instead_of_fit_and_sound(qapp) -> None:
+    panel = ClipPropertiesPanel()
+    clip = new_title_clip(Title(text="Hello"))
+    panel.set_clip(clip)
+
+    assert panel._full_name == "Title"
+    assert panel._title_text.toPlainText() == "Hello"
+    assert not panel._title_text.isHidden() and not panel._background_button.isHidden()
+    assert panel._fit_mode_combo.isHidden() and panel._mute_box.isHidden()
+    assert panel._fade_in_box.isChecked() and panel._fade_out_box.isChecked()
+
+    panel.set_clip(make_clip())
+    assert panel._title_text.isHidden() and not panel._fit_mode_combo.isHidden()
+
+
+def test_typed_title_text_is_sent_after_a_pause(qapp) -> None:
+    panel = ClipPropertiesPanel()
+    clip = new_title_clip()
+    panel.set_clip(clip)
+    sent: list[tuple] = []
+    panel.title_changed.connect(lambda *args: sent.append(args))
+
+    panel._title_text.setPlainText("Our")
+    panel._title_text.setPlainText("Our Trip")
+    assert sent == []  # still typing
+    wait_for_typing_pause(qapp)
+
+    assert sent == [("Edit title", clip.id, Title(text="Our Trip"), True)]
+
+
+def test_selecting_another_clip_sends_unsent_text_to_the_title_it_was_typed_into(qapp) -> None:
+    panel = ClipPropertiesPanel()
+    clip = new_title_clip()
+    panel.set_clip(clip)
+    sent: list[tuple] = []
+    panel.title_changed.connect(lambda *args: sent.append(args))
+
+    panel._title_text.setPlainText("Quick")
+    panel.set_clip(make_clip())
+
+    assert sent == [("Edit title", clip.id, Title(text="Quick"), True)]
+    wait_for_typing_pause(qapp)
+    assert len(sent) == 1
+
+
+def test_choosing_a_title_color(qapp, monkeypatch) -> None:
+    panel = ClipPropertiesPanel()
+    clip = new_title_clip()
+    panel.set_clip(clip)
+    sent: list[tuple] = []
+    panel.title_changed.connect(lambda *args: sent.append(args))
+    monkeypatch.setattr(QColorDialog, "getColor", lambda *_args: QColor("#aa0000"))
+
+    panel._background_button.click()
+    panel._text_color_button.click()
+
+    assert sent == [
+        ("Change title background", clip.id, Title(background="#aa0000"), False),
+        ("Change title text color", clip.id, Title(text_color="#aa0000"), False),
+    ]
+    monkeypatch.setattr(QColorDialog, "getColor", lambda *_args: QColor())  # cancelled
+    panel._background_button.click()
+    assert len(sent) == 2

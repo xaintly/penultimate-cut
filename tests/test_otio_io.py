@@ -1,9 +1,18 @@
 import subprocess
+from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 
 from penultimate_cut.io.otio_io import find_relink_candidates, load_project, save_project
-from penultimate_cut.model.project import Clip, Gap, MediaRef, Project, Track
+from penultimate_cut.model.project import (
+    Clip,
+    Gap,
+    MediaRef,
+    Project,
+    Title,
+    Track,
+    new_title_clip,
+)
 
 
 def make_media(tmp_path: Path, name: str = "a.mp4", duration: Fraction = Fraction(10)) -> MediaRef:
@@ -248,14 +257,14 @@ def test_loading_a_version_1_project_remeasures_media_at_display_size(
         Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip])]), project_path
     )
     text = project_path.read_text(encoding="utf-8")
-    assert '"schema_version": 3' in text
-    project_path.write_text(text.replace('"schema_version": 3', '"schema_version": 1'), "utf-8")
+    assert '"schema_version": 4' in text
+    project_path.write_text(text.replace('"schema_version": 4', '"schema_version": 1'), "utf-8")
 
     loaded = load_project(project_path).project
 
     loaded_media = loaded.tracks[0].items[0].media_ref
     assert (loaded_media.width, loaded_media.height) == (240, 320)
-    assert loaded.schema_version == 3
+    assert loaded.schema_version == 4
 
 
 def test_loading_a_version_2_project_converts_volume_db_to_percent(tmp_path: Path) -> None:
@@ -268,7 +277,7 @@ def test_loading_a_version_2_project_converts_volume_db_to_percent(tmp_path: Pat
     # What version 2 wrote: a dB volume, and no fade fields at all.
     text = project_path.read_text(encoding="utf-8")
     for old, new in [
-        ('"schema_version": 3', '"schema_version": 2'),
+        ('"schema_version": 4', '"schema_version": 2'),
         ('"volume": 55', '"volume_db": -6.0206'),
         ('"fade_in": false,', ""),
         ('"fade_out": false,', ""),
@@ -282,3 +291,36 @@ def test_loading_a_version_2_project_converts_volume_db_to_percent(tmp_path: Pat
     assert isinstance(loaded_clip, Clip)
     assert loaded_clip.volume == 50  # -6 dB is half the amplitude
     assert (loaded_clip.fade_in, loaded_clip.fade_out) == (False, False)
+
+
+def test_title_cards_round_trip_as_generated_media(tmp_path: Path) -> None:
+    media = make_media(tmp_path)
+    title = Title(text="Our Trip\nSummer 2026", background="#336699", text_color="#ffee00")
+    titled = new_title_clip(title)
+    trimmed = replace(titled, source_out=Fraction(7, 2), fade_out=False)
+    plain = new_title_clip()
+    track = Track(
+        kind="video",
+        items=[
+            trimmed,
+            Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(2)),
+            plain,
+        ],
+    )
+    project_path = tmp_path / "titles.otio"
+    save_project(Project(frame_rate=Fraction(30), tracks=[track]), project_path)
+
+    text = project_path.read_text(encoding="utf-8")
+    assert '"generator_kind": "PenultimateCutTitle"' in text
+    assert '"name": "Title: Our Trip"' in text  # what other apps show for it
+
+    loaded = load_project(project_path)
+    assert loaded.missing_media == []  # a title has no file to go missing
+    first, _, last = loaded.project.tracks[0].items
+    assert isinstance(first, Clip) and isinstance(last, Clip)
+    assert first.media_ref.title == title
+    assert (first.source_in, first.source_out) == (Fraction(0), Fraction(7, 2))
+    assert first.fade_in and not first.fade_out
+    assert first.media_ref.id == trimmed.media_ref.id
+    assert last.media_ref.title == Title()
+    assert first.media_ref.is_still_image and not first.media_ref.has_audio

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from penultimate_cut.model.project import Clip, Gap, MediaRef, Track
+from penultimate_cut.model.project import Clip, Gap, MediaRef, Title, Track, new_title_clip
 from penultimate_cut.model.timeline_ops import (
     TimelineOpError,
     delete_item,
@@ -15,6 +15,7 @@ from penultimate_cut.model.timeline_ops import (
     remove_media,
     set_clip_options,
     set_fit_mode,
+    set_title,
     split_at,
     trim_item,
 )
@@ -246,3 +247,31 @@ def test_split_keeps_fades_at_the_outer_ends() -> None:
     assert (first.fade_in, first.fade_out) == (True, False)
     assert (second.fade_in, second.fade_out) == (False, True)
     assert first.volume == second.volume == 40
+
+
+def test_set_title_gives_the_clip_its_own_new_media() -> None:
+    title_clip = new_title_clip()
+    other = make_clip()
+    track = Track(kind="video", items=[title_clip, other])
+    split = split_at(track, Fraction(2))  # both halves share one title
+
+    changed = set_title(split, 1, Title(text="Part two"))
+
+    first, second = changed.items[0], changed.items[1]
+    assert isinstance(first, Clip) and isinstance(second, Clip)
+    assert first.media_ref.title == Title()  # the other half keeps its text
+    assert second.media_ref.title == Title(text="Part two")
+    assert second.media_ref.id != first.media_ref.id
+    assert second.id == split.items[1].id  # still the same clip
+    assert second.fade_out and (second.source_in, second.source_out) == (
+        split.items[1].source_in,
+        split.items[1].source_out,
+    )
+    assert split.items[1].media_ref.title == Title()  # input untouched
+
+
+def test_set_title_rejects_anything_but_a_title() -> None:
+    track = Track(kind="video", items=[make_clip(), Gap(duration=Fraction(1))])
+    for index in (0, 1):
+        with pytest.raises(TimelineOpError):
+            set_title(track, index, Title())

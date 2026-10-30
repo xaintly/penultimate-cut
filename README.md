@@ -26,6 +26,9 @@ connection, and nothing is uploaded.
   or close it up. Every change can be undone.
 - **Simple sound and fades.** Each clip has its own volume and a mute switch,
   and can fade in from black or fade out to black.
+- **Title cards.** Add Title puts a full-screen card of text (white on dark
+  blue, or colors of your choice) anywhere in the video: an opening title,
+  a section heading, or "The End".
 - **Mixed shapes handled.** A vertical phone clip in a widescreen video can
   have black bars, a blurred background, or be cropped to fill the frame.
 - **Scales to long videos.** Hours of footage stay responsive. The timeline
@@ -58,6 +61,7 @@ these.
 | + / − | Zoom the timeline in / out |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Ctrl+I | Import media |
+| Ctrl+T | Add a title card at the playhead |
 | Ctrl+E | Export video |
 | Ctrl+N / Ctrl+O | New / open project |
 | Ctrl+S / Ctrl+Shift+S | Save / save as |

@@ -19,12 +19,13 @@ def cache_dir_for(media_path: Path) -> Path:
     stat = resolved.stat()
     key = f"{resolved}|{stat.st_size}|{stat.st_mtime_ns}"
     digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
-    cache_dir = _cache_root() / digest
+    cache_dir = cache_root() / digest
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 
 
-def _cache_root() -> Path:
+def cache_root() -> Path:
+    """Where everything cached lives (not created here)."""
     override = os.environ.get("PENULTIMATE_CUT_CACHE_DIR")
     if override:
         return Path(override)

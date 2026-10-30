@@ -6,7 +6,15 @@ from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QUndoStack
 from PySide6.QtTest import QTest
 
-from penultimate_cut.model.project import Clip, Gap, MediaRef, Project, Track
+from penultimate_cut.model.project import (
+    Clip,
+    Gap,
+    MediaRef,
+    Project,
+    Title,
+    Track,
+    new_title_clip,
+)
 from penultimate_cut.ui.media_bin import MEDIA_MIME_TYPE
 from penultimate_cut.ui.timeline.widget import (
     _CLIP_BG,
@@ -922,5 +930,30 @@ def test_hover_tooltip_says_where_a_clip_came_from(qapp, make_video_clip, monkey
         hover(100)
         hover(700)  # past the end of the timeline
         assert shown == [item_tooltip(clip), None]
+    finally:
+        widget.shutdown()
+
+
+def test_title_card_is_drawn_on_the_timeline_and_inserted_at_the_playhead(qapp) -> None:
+    title = Title(text="", background="#00aa00")
+    project = Project(
+        frame_rate=Fraction(30),
+        tracks=[Track(kind="video", items=[new_title_clip(title), Gap(duration=Fraction(2))])],
+    )
+    widget = TimelineWidget()
+    try:
+        widget.resize(800, 150)
+        widget.set_project(project, QUndoStack())
+        widget.show()
+        qapp.processEvents()
+
+        image = widget._canvas.grab().toImage()
+        card = image.pixelColor(125, TRACK_TOP + 25)  # mid-card, clear of the fades
+        assert card.green() > 120 and card.red() < 40 and card.blue() < 40
+        assert item_tooltip(project.tracks[0].items[0]) == "Title\nLength 5.0 s"
+
+        for playhead, index in [(0, 0), (Fraction(9, 2), 0), (5, 1), (7, 2), (20, 2)]:
+            widget.set_playhead(Fraction(playhead))
+            assert widget.index_at_playhead() == index
     finally:
         widget.shutdown()

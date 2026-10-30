@@ -29,6 +29,26 @@ FADE_LENGTH = Fraction(1)
 """Fade in from / out to black: one second, shortened on short clips (see
 `fade_length`). No setting for it -- one less thing to learn."""
 
+TITLE_BACKGROUND = "#012456"
+"""A title card's default background: the classic dark blue."""
+TITLE_TEXT_COLOR = "#ffffff"
+TITLE_DEFAULT_TEXT = "Your Title"
+TITLE_DEFAULT_DURATION = Fraction(5)
+TITLE_MAX_DURATION = Fraction(24 * 60 * 60)
+"""Like a still image's: a title has no length of its own, so this only
+bounds trimming."""
+
+
+@dataclass(frozen=True)
+class Title:
+    """A full-screen title card: text centered on a colored background.
+    Colors are "#rrggbb". Frozen (hashable), so a rendered picture of it can
+    be looked up by the title itself."""
+
+    text: str = TITLE_DEFAULT_TEXT
+    background: str = TITLE_BACKGROUND
+    text_color: str = TITLE_TEXT_COLOR
+
 
 @dataclass
 class MediaRef:
@@ -43,10 +63,25 @@ class MediaRef:
     width: int | None = None
     height: int | None = None
     id: str = field(default_factory=lambda: uuid4().hex)
+    title: Title | None = None
+    """Set for a title card, which is generated rather than read from a file
+    (its `path` means nothing). It behaves like a still image otherwise."""
 
     @property
     def is_still_image(self) -> bool:
         return self.has_video and self.frame_rate is None
+
+    @property
+    def is_title(self) -> bool:
+        return self.title is not None
+
+    @property
+    def display_name(self) -> str:
+        """The file name, or for a title "Title: " and its first line."""
+        if self.title is None:
+            return self.path.name
+        first_line = next((line for line in self.title.text.splitlines() if line.strip()), "")
+        return f"Title: {first_line.strip()}" if first_line else "Title"
 
 
 @dataclass
@@ -119,7 +154,7 @@ class Project:
     frame_rate: Rate
     tracks: list[Track] = field(default_factory=list)
     name: str = "Untitled"
-    schema_version: int = 3  # io/otio_io.py's SCHEMA_VERSION
+    schema_version: int = 4  # io/otio_io.py's SCHEMA_VERSION
 
     @property
     def duration(self) -> Fraction:
@@ -135,6 +170,42 @@ def default_clip_for(media_ref: MediaRef) -> Clip:
             media_ref=media_ref, source_in=Fraction(0), source_out=STILL_IMAGE_DEFAULT_DURATION
         )
     return Clip(media_ref=media_ref, source_in=Fraction(0), source_out=media_ref.duration)
+
+
+def title_media(title: Title) -> MediaRef:
+    """The media reference behind a title card."""
+    return MediaRef(
+        path=Path(),
+        relative_path=None,
+        duration=TITLE_MAX_DURATION,
+        frame_rate=None,
+        has_video=True,
+        has_audio=False,
+        title=title,
+    )
+
+
+def new_title_clip(title: Title | None = None) -> Clip:
+    """A title card as added by "Add Title": the default length, fading in
+    from and out to black."""
+    return Clip(
+        media_ref=title_media(title or Title()),
+        source_in=Fraction(0),
+        source_out=TITLE_DEFAULT_DURATION,
+        fade_in=True,
+        fade_out=True,
+    )
+
+
+def project_titles(project: Project) -> set[Title]:
+    """Every distinct title card on the timeline -- what has to be drawn
+    before the project can be previewed or exported."""
+    return {
+        item.media_ref.title
+        for track in project.tracks
+        for item in track.items
+        if isinstance(item, Clip) and item.media_ref.title is not None
+    }
 
 
 DEFAULT_RESOLUTION = (1280, 720)

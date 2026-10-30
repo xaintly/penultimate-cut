@@ -21,6 +21,10 @@ whose timestamps start at 0 after trimming, so a fade-out starts at
 `duration - fade_length`. Clips at their defaults get no extra filters, so
 their part of the graph is unchanged.
 
+Title cards are drawn beforehand at the output size (by `ui/titles.py`)
+and exported like any still image; `build_filtergraph` takes the picture
+for each title rather than drawing anything itself.
+
 Clips are cut with the `trim`/`atrim` filters (exact frame/sample boundaries
 on the fully decoded stream), not `-ss` before `-i` (fast, but only
 keyframe-accurate) -- correctness over export speed. Revisit only if export
@@ -29,11 +33,21 @@ time on long sources actually becomes a real problem.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from fractions import Fraction
+from pathlib import Path
 from typing import Literal
 
-from penultimate_cut.model.project import Clip, FitMode, Gap, Project, auto_resolution, even
+from penultimate_cut.model.project import (
+    Clip,
+    FitMode,
+    Gap,
+    Project,
+    Title,
+    auto_resolution,
+    even,
+)
 from penultimate_cut.model.time import format_seconds
 
 ResolutionChoice = Literal["auto", "1080p", "720p", "480p", "360p"]
@@ -62,8 +76,14 @@ class FFmpegPlan:
     frame_rate: Fraction
 
 
-def build_filtergraph(project: Project, resolution: ResolutionChoice = "auto") -> FFmpegPlan:
-    """Build the input list and filter_complex for exporting `project`."""
+def build_filtergraph(
+    project: Project,
+    resolution: ResolutionChoice = "auto",
+    title_images: Mapping[Title, Path] | None = None,
+) -> FFmpegPlan:
+    """Build the input list and filter_complex for exporting `project`.
+    `title_images` holds the picture of each title card on the timeline,
+    drawn at the output size (see `target_resolution`)."""
     if len(project.tracks) != 1:
         raise FiltergraphError("export only supports a single track for now")
     track = project.tracks[0]
@@ -84,7 +104,7 @@ def build_filtergraph(project: Project, resolution: ResolutionChoice = "auto") -
             )
         else:
             new_inputs, v_filter, a_filter = _clip_filters(
-                item, index, len(input_args), width, height, rate
+                item, index, len(input_args), width, height, rate, title_images or {}
             )
         input_args.extend(new_inputs)
         video_filters.append(v_filter)
@@ -110,13 +130,24 @@ def build_filtergraph(project: Project, resolution: ResolutionChoice = "auto") -
 
 
 def _clip_filters(
-    clip: Clip, index: int, input_index: int, width: int, height: int, rate: Fraction
+    clip: Clip,
+    index: int,
+    input_index: int,
+    width: int,
+    height: int,
+    rate: Fraction,
+    title_images: Mapping[Title, Path],
 ) -> tuple[list[list[str]], str, str]:
     if clip.speed != 1:
         raise FiltergraphError("speed-changed clips can't be exported yet")
     if not clip.media_ref.has_video:
         raise FiltergraphError("a non-video clip can't sit on the video track")
 
+    path = clip.media_ref.path
+    if clip.media_ref.title is not None:
+        if clip.media_ref.title not in title_images:
+            raise FiltergraphError("a title card hasn't been drawn yet")
+        path = title_images[clip.media_ref.title]
     is_still = clip.media_ref.is_still_image
     start = Fraction(0) if is_still else clip.source_in
     end = clip.duration if is_still else clip.source_out
@@ -124,13 +155,13 @@ def _clip_filters(
 
     inputs: list[list[str]] = []
     if is_still:
-        inputs.append(["-loop", "1", "-i", str(clip.media_ref.path)])
+        inputs.append(["-loop", "1", "-i", str(path)])
         pre = (
             f"[{input_index}:v]fps={rate},trim=start=0:end={duration_s},"
             f"setpts=PTS-STARTPTS,{_SQUARE_PIXELS}[v{index}pre]"
         )
     else:
-        inputs.append(["-i", str(clip.media_ref.path)])
+        inputs.append(["-i", str(path)])
         pre = (
             f"[{input_index}:v]trim=start={format_seconds(start)}:end={format_seconds(end)},"
             f"setpts=PTS-STARTPTS,fps={rate},{_SQUARE_PIXELS}[v{index}pre]"

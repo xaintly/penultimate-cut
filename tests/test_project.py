@@ -3,13 +3,17 @@ from pathlib import Path
 
 from penultimate_cut.model.project import (
     STILL_IMAGE_DEFAULT_DURATION,
+    TITLE_DEFAULT_DURATION,
     Clip,
     Gap,
     MediaRef,
     Project,
+    Title,
     Track,
     auto_resolution,
     default_clip_for,
+    new_title_clip,
+    project_titles,
 )
 
 
@@ -93,3 +97,42 @@ def test_auto_resolution_keeps_an_all_vertical_project_vertical() -> None:
 def test_auto_resolution_tie_goes_to_the_shape_that_comes_first() -> None:
     project = project_of(sized_clip(640, 480, 10), sized_clip(1280, 720, 10))
     assert auto_resolution(project) == (640, 480)
+
+
+def test_new_title_clip_is_a_faded_still_with_default_title() -> None:
+    clip = new_title_clip()
+    assert clip.media_ref.title == Title()
+    assert clip.media_ref.title.background == "#012456"
+    assert clip.media_ref.is_title and clip.media_ref.is_still_image
+    assert not clip.media_ref.has_audio
+    assert clip.duration == TITLE_DEFAULT_DURATION
+    assert clip.fade_in and clip.fade_out
+
+
+def test_display_name_is_file_name_or_first_line_of_title() -> None:
+    assert new_title_clip(Title(text="\n  Our Trip  \nby Sam")).media_ref.display_name == (
+        "Title: Our Trip"
+    )
+    assert new_title_clip(Title(text="  ")).media_ref.display_name == "Title"
+    media = MediaRef(
+        path=Path("clips/a.mp4"),
+        relative_path=None,
+        duration=Fraction(1),
+        frame_rate=Fraction(30),
+        has_video=True,
+        has_audio=True,
+    )
+    assert media.display_name == "a.mp4"
+
+
+def test_project_titles_lists_each_title_once_and_ignores_resolution() -> None:
+    first, second = Title(text="Start"), Title(text="End")
+    track = Track(
+        kind="video",
+        items=[new_title_clip(first), Gap(duration=Fraction(1)), new_title_clip(second)],
+    )
+    track.items.append(new_title_clip(first))
+    project = Project(frame_rate=Fraction(30), tracks=[track])
+    assert project_titles(project) == {first, second}
+    # Titles have no size of their own; they're drawn at the project's.
+    assert auto_resolution(project) == (1280, 720)

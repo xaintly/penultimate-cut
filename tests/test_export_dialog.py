@@ -1,9 +1,10 @@
+import subprocess
 import time
 from fractions import Fraction
 from pathlib import Path
 
 from penultimate_cut.media.probe import probe
-from penultimate_cut.model.project import Clip, MediaRef, Project, Track
+from penultimate_cut.model.project import Clip, MediaRef, Project, Title, Track, new_title_clip
 from penultimate_cut.ui.export_dialog import ExportDialog
 
 
@@ -173,3 +174,28 @@ def test_failed_export_stays_visible_and_offers_details(
     assert dialog._status_label.text() == "Export failed."
     assert not dialog._status_label.isHidden()
     assert len(shown) == 1 and "ffmpeg exited" in shown[0]
+
+
+def test_real_export_draws_title_cards(qapp, make_video_clip, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PENULTIMATE_CUT_CACHE_DIR", str(tmp_path / "cache"))
+    source = make_video_clip("ed_title.mp4", duration=2.0, fps=30, size="320x240")
+    project = make_project(source, duration=2.0)
+    project.tracks[0].items.insert(0, new_title_clip(Title(text="")))
+    dialog = ExportDialog(project)
+    output_path = tmp_path / "titled.mp4"
+    dialog._path_edit.setText(str(output_path))
+
+    accepted = []
+    dialog.accepted.connect(lambda: accepted.append(True))
+    dialog._start_export()
+    assert pump_until(qapp, lambda: accepted)
+
+    info = probe(output_path)
+    assert abs(info.duration - Fraction(7)) < Fraction(1, 5)
+    frame = subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-ss", "2.5", "-i", str(output_path),
+         "-frames:v", "1", "-vf", "scale=1:1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        check=True, capture_output=True,
+    ).stdout  # fmt: skip
+    red, green, blue = frame[0], frame[1], frame[2]
+    assert blue > 60 and red < 20 and green < 50  # the dark blue card (#012456)

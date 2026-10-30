@@ -33,6 +33,16 @@ second clip lands at its start, also when playback starts mid-fade); audio
 switches within about 20 ms of a clip boundary, since it's filtered in
 chunks. Export applies the same settings per clip, exactly.
 
+Title cards are drawn beforehand (by `ui/titles.py`, at the preview's
+size) and play as an image list (`mf://@list`) repeating the picture at
+`TITLE_FPS`: `to_edl` takes the list for each title rather than drawing
+anything itself. Not as a plain still image: mpv shows that as one frame at
+its start, so an exact seek into the middle skips past it (to the next
+clip) and a fade has no frames to animate. Nor as a looping lavfi `movie`
+source: after a seek backwards within it, every later seek into it lands
+at its end. Both checked against a live libmpv; the image list seeks to
+within a frame from anywhere, both ways, and plays in real time.
+
 EDL timestamps are plain floating-point seconds -- there's no way to carry
 our exact `Fraction` times through this format. That's fine for preview
 scrubbing; export still cuts on exact frame boundaries via the ffmpeg
@@ -41,12 +51,15 @@ filtergraph, which is the thing that actually has to be frame-accurate.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from fractions import Fraction
+from pathlib import Path
 
 from penultimate_cut.model.project import (
     Clip,
     Gap,
     Project,
+    Title,
     TrackItem,
     TrackKind,
     auto_resolution,
@@ -55,6 +68,9 @@ from penultimate_cut.model.time import format_seconds
 
 HEADER = "# mpv EDL v0"
 
+TITLE_FPS = 10
+"""Frames per second of a title card's image list: the player's `mf-fps`."""
+
 _GAP_AUDIO_RATE = 48000
 
 
@@ -62,16 +78,19 @@ class EDLError(ValueError):
     """`project` can't be represented as an EDL (yet)."""
 
 
-def to_edl(project: Project) -> str:
-    """Render `project` as mpv EDL text. Empty tracks are omitted."""
+def to_edl(project: Project, title_lists: Mapping[Title, Path] | None = None) -> str:
+    """Render `project` as mpv EDL text. Empty tracks are omitted.
+    `title_lists` holds the image list for each title card on the timeline
+    (see `model.project.project_titles`), long enough for its longest use."""
     width, height = auto_resolution(project)
+    lists = title_lists or {}
     lines = [HEADER]
     for track in project.tracks:
         if not track.items:
             continue
         lines.append("!new_stream")
         for item in track.items:
-            lines.append(_item_line(item, track.kind, project.frame_rate, width, height))
+            lines.append(_item_line(item, track.kind, project.frame_rate, width, height, lists))
     return "\n".join(lines) + "\n"
 
 
@@ -113,19 +132,33 @@ def _during(start: Fraction, end: Fraction) -> str:
 
 
 def _item_line(
-    item: TrackItem, track_kind: TrackKind, project_rate: Fraction, width: int, height: int
+    item: TrackItem,
+    track_kind: TrackKind,
+    project_rate: Fraction,
+    width: int,
+    height: int,
+    title_lists: Mapping[Title, Path],
 ) -> str:
     if isinstance(item, Gap):
         return _gap_line(item, track_kind, project_rate, width, height)
-    return _clip_line(item)
+    return _clip_line(item, title_lists)
 
 
-def _clip_line(clip: Clip) -> str:
+def _clip_line(clip: Clip, title_lists: Mapping[Title, Path]) -> str:
     if clip.speed != 1:
         raise EDLError("speed-changed clips can't be previewed via EDL yet")
     start = Fraction(0) if clip.media_ref.is_still_image else clip.source_in
     length = clip.source_out - clip.source_in
-    return _segment(str(clip.media_ref.path), start, length)
+    return _segment(_source(clip, title_lists), start, length)
+
+
+def _source(clip: Clip, title_lists: Mapping[Title, Path]) -> str:
+    title = clip.media_ref.title
+    if title is None:
+        return str(clip.media_ref.path)
+    if title not in title_lists:
+        raise EDLError("a title card hasn't been drawn yet")
+    return f"mf://@{title_lists[title]}"
 
 
 def _gap_line(

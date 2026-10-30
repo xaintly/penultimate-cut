@@ -20,7 +20,7 @@ from typing import Literal
 from PySide6.QtGui import QUndoCommand
 
 from penultimate_cut.model import timeline_ops
-from penultimate_cut.model.project import FitMode, Gap, Project, Track, TrackItem
+from penultimate_cut.model.project import FitMode, Gap, Project, Title, Track, TrackItem
 
 
 class _TrackSwapCommand(QUndoCommand):
@@ -140,12 +140,54 @@ class SetClipOptionsCommand(_TrackSwapCommand):
         super().__init__(text, project, track_index, new_track)
 
 
+class SetTitleCommand(_TrackSwapCommand):
+    """Change a title card's text or colors (see `timeline_ops.set_title`).
+
+    With `typing=True`, consecutive text edits of the same title merge into
+    one undo step: the text is committed as it's typed, a pause at a time,
+    and undo should take back the whole edit, not a few letters."""
+
+    _MERGE_ID = 1
+
+    def __init__(
+        self,
+        text: str,
+        project: Project,
+        track_index: int,
+        item_index: int,
+        title: Title,
+        *,
+        typing: bool = False,
+    ) -> None:
+        track = project.tracks[track_index]
+        new_track = timeline_ops.set_title(track, item_index, title)
+        super().__init__(text, project, track_index, new_track)
+        self._clip_id = track.items[item_index].id
+        self._typing = typing
+
+    def id(self) -> int:
+        return self._MERGE_ID if self._typing else -1
+
+    def mergeWith(self, other: QUndoCommand) -> bool:
+        if not (
+            isinstance(other, SetTitleCommand)
+            and other._typing
+            and other._clip_id == self._clip_id
+            and other._track_index == self._track_index
+        ):
+            return False
+        self._new_track = other._new_track
+        return True
+
+
 class InsertCommand(_TrackSwapCommand):
     """Place a new clip (or gap) onto the track, e.g. from the media bin."""
 
-    def __init__(self, project: Project, track_index: int, index: int, item: TrackItem) -> None:
+    def __init__(
+        self, project: Project, track_index: int, index: int, item: TrackItem, text: str = "Insert"
+    ) -> None:
         new_track = timeline_ops.insert_item(project.tracks[track_index], index, item)
-        super().__init__("Insert", project, track_index, new_track)
+        super().__init__(text, project, track_index, new_track)
 
 
 class MoveCommand(_TrackSwapCommand):

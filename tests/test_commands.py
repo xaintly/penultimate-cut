@@ -10,10 +10,11 @@ from penultimate_cut.commands.timeline_commands import (
     MoveCommand,
     SetClipOptionsCommand,
     SetFitModeCommand,
+    SetTitleCommand,
     SplitCommand,
     TrimCommand,
 )
-from penultimate_cut.model.project import Clip, Gap, MediaRef, Project, Track
+from penultimate_cut.model.project import Clip, Gap, MediaRef, Project, Title, Track, new_title_clip
 from penultimate_cut.model.timeline_ops import TimelineOpError
 
 
@@ -193,3 +194,38 @@ def test_set_clip_options_command_undoes() -> None:
     assert stack.undoText() == "Mute"
     stack.undo()
     assert project.tracks[0] is original_track
+
+
+def test_typing_into_a_title_is_one_undo_step() -> None:
+    title_clip = new_title_clip()
+    project = make_project(title_clip, make_clip())
+    stack = QUndoStack()
+    changes: list[int] = []
+    stack.indexChanged.connect(changes.append)
+
+    for text in ("H", "Hello", "Hello there"):
+        stack.push(SetTitleCommand("Edit title", project, 0, 0, Title(text=text), typing=True))
+
+    assert stack.count() == 1
+    assert len(changes) == 3  # the preview hears about every pause
+    assert project.tracks[0].items[0].media_ref.title == Title(text="Hello there")
+    stack.undo()
+    assert project.tracks[0].items[0].media_ref.title == Title()
+    stack.redo()
+    assert project.tracks[0].items[0].media_ref.title == Title(text="Hello there")
+
+
+def test_title_color_changes_and_other_titles_are_separate_undo_steps() -> None:
+    project = make_project(new_title_clip(), new_title_clip())
+    stack = QUndoStack()
+    stack.push(SetTitleCommand("Edit title", project, 0, 0, Title(text="A"), typing=True))
+    red = Title(text="A", background="#ff0000")
+    stack.push(SetTitleCommand("Change title background", project, 0, 0, red))
+    stack.push(SetTitleCommand("Edit title", project, 0, 0, Title(text="B"), typing=True))
+    stack.push(SetTitleCommand("Edit title", project, 0, 1, Title(text="C"), typing=True))
+
+    assert stack.count() == 4
+    assert stack.undoText() == "Edit title"
+    stack.undo()
+    stack.undo()
+    assert project.tracks[0].items[0].media_ref.title == red

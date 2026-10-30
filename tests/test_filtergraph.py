@@ -1,4 +1,5 @@
 import subprocess
+from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 
@@ -10,7 +11,15 @@ from penultimate_cut.export.filtergraph import (
     target_resolution,
 )
 from penultimate_cut.media.probe import probe
-from penultimate_cut.model.project import Clip, Gap, MediaRef, Project, Track
+from penultimate_cut.model.project import (
+    Clip,
+    Gap,
+    MediaRef,
+    Project,
+    Title,
+    Track,
+    new_title_clip,
+)
 
 
 def make_media(
@@ -413,3 +422,28 @@ def test_export_joins_non_square_pixel_clip_with_gap_and_square_clip(
     ).stdout.strip()  # fmt: skip
     assert sar == "1:1"
     assert abs(probe(output_path).duration - 3) < Fraction(1, 10)
+
+
+def test_title_is_exported_from_its_drawn_picture(
+    tmp_path: Path, make_video_clip, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from penultimate_cut.ui.titles import title_images
+
+    monkeypatch.setenv("PENULTIMATE_CUT_CACHE_DIR", str(tmp_path / "cache"))
+    source = make_video_clip("filt_title.mp4", duration=2.0, fps=30, size="320x240")
+    title = Title(text="Hello", background="#ffffff", text_color="#ffffff")
+    clip = Clip(media_ref=make_media(source), source_in=Fraction(0), source_out=Fraction(2))
+    track = Track(kind="video", items=[replace(new_title_clip(title), fade_out=False), clip])
+    project = Project(frame_rate=Fraction(30), tracks=[track])
+
+    with pytest.raises(FiltergraphError):
+        build_filtergraph(project)  # not drawn yet
+    images = title_images(project, *target_resolution(project, "auto"))
+    plan = build_filtergraph(project, "auto", images)
+    assert ["-loop", "1", "-i", str(images[title])] in plan.input_args
+
+    output_path = render(tmp_path, plan)
+    info = probe(output_path)
+    assert abs(info.duration - Fraction(7)) < Fraction(1, 15)
+    assert _brightness_at(output_path, 0.1) < 60  # fading in from black
+    assert _brightness_at(output_path, 3.0) > 200  # the (white) card itself

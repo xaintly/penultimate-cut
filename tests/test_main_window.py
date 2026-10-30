@@ -1,7 +1,9 @@
 import time
 from fractions import Fraction
 
-from penultimate_cut.model.project import Clip, Gap
+from PySide6.QtTest import QTest
+
+from penultimate_cut.model.project import Clip, Gap, Title
 from penultimate_cut.ui.main_window import MainWindow
 
 
@@ -78,7 +80,8 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         assert menu_keys["Back 1 Second"] == "Shift+Left"
         assert menu_keys["Go to Start"] == "Home"
         assert menu_keys["Go to End"] == "End"
-        assert window._add_title_button.isHidden()  # Phase 2
+        assert menu_keys["Add Title"] == "Ctrl+T"
+        assert not window._add_title_button.isHidden()
         # Undo/Redo live in the Edit menu (with their Ctrl+Z/Ctrl+Y
         # shortcuts), disabled while there's nothing to undo/redo.
         assert window._undo_action.shortcut().toString() == "Ctrl+Z"
@@ -276,6 +279,56 @@ def test_removing_media_from_the_bin(qapp, make_video_clip, monkeypatch) -> None
         window._undo_action.trigger()
         assert len(window.project.tracks[0].items) == 1
         assert pump_until(qapp, lambda: window.media_bin.get(used_entry.media_ref.id) is not None)
+    finally:
+        window.undo_stack.setClean()
+        window.close()
+        qapp.processEvents()
+
+
+def test_adding_and_editing_a_title(qapp, make_video_clip, monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PENULTIMATE_CUT_CACHE_DIR", str(tmp_path / "cache"))
+    source = make_video_clip("mw_title.mp4", duration=2.0, fps=30, size="320x240")
+    window = MainWindow(vo="null")
+    try:
+        window.show()
+        window.activateWindow()
+        window.media_bin.import_files([source])
+        assert pump_until(qapp, lambda: len(window.media_bin.entries) == 1)
+        window._on_media_double_clicked(window.media_bin.entries[0])
+
+        # At the end of the timeline: the title goes after the clip...
+        window._jump_to(window.project.duration)
+        window._add_title_button.click()
+        items = window.project.tracks[0].items
+        assert len(items) == 2 and items[1].media_ref.title == Title()
+        assert window._undo_action.text() == "Undo Add title"
+        assert window._selected_index == 1
+        assert window.timeline.playhead == Fraction(2)
+        panel = window.clip_properties
+        assert panel._title_text.textCursor().selectedText() == "Your Title"
+
+        # ...at the start, before it.
+        window._jump_to(Fraction(0))
+        window._add_title_button.click()
+        items = window.project.tracks[0].items
+        assert [item.media_ref.is_title for item in items] == [True, False, True]
+        assert window._selected_index == 0
+
+        # Typing goes into the title, not to the S (split) and Space keys.
+        QTest.keyClicks(panel._title_text, "So Simple")
+        assert pump_until(qapp, lambda: window.undo_stack.undoText() == "Edit title")
+        assert window.project.tracks[0].items[0].media_ref.title == Title(text="So Simple")
+        assert len(window.project.tracks[0].items) == 3  # nothing was split
+        assert not window.preview.player.is_playing
+        assert window.undo_stack.count() == 4  # insert, title, title, one text edit
+
+        # Titles never show up in the media bin.
+        window._populate_media_bin_from_project(window.project)
+        assert len(window.media_bin.entries) == 1
+
+        window._undo_action.trigger()
+        assert window.project.tracks[0].items[0].media_ref.title == Title()
+        assert panel._title_text.toPlainText() == "Your Title"
     finally:
         window.undo_stack.setClean()
         window.close()

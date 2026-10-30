@@ -53,6 +53,7 @@ from penultimate_cut.export.filtergraph import (
 from penultimate_cut.export.runner import ExportCancelled, ExportProgress, RunnerError, run_export
 from penultimate_cut.model.project import Project
 from penultimate_cut.ui.format import format_duration
+from penultimate_cut.ui.titles import title_images
 
 _RESOLUTION_LABELS: dict[ResolutionChoice, str] = {
     "auto": "Automatic",  # shown with its actual size, e.g. "Automatic (1920×1080)"
@@ -184,8 +185,9 @@ class ExportDialog(QDialog):
         quality = self._quality_combo.currentData()
 
         try:
-            plan = build_filtergraph(self._project, resolution)
-        except FiltergraphError as exc:
+            images = title_images(self._project, *target_resolution(self._project, resolution))
+            plan = build_filtergraph(self._project, resolution, images)
+        except (FiltergraphError, OSError) as exc:
             self._status_label.show()
             self._status_label.setText(f"Can't export: {exc}")
             return

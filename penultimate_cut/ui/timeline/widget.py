@@ -73,12 +73,22 @@ from penultimate_cut.media.waveform import (
     media_waveform,
     peak_between,
 )
-from penultimate_cut.model.project import Clip, Gap, MediaRef, Project, Track, TrackItem
+from penultimate_cut.model.project import (
+    Clip,
+    Gap,
+    MediaRef,
+    Project,
+    Title,
+    Track,
+    TrackItem,
+    auto_resolution,
+)
 from penultimate_cut.model.time import fraction_from_seconds, snap_to_frame
 from penultimate_cut.model.timeline_ops import TimelineOpError, move_item, trim_item
 from penultimate_cut.ui.format import format_duration
 from penultimate_cut.ui.media_bin import MEDIA_MIME_TYPE
 from penultimate_cut.ui.timeline.geometry import TimelineView, hit_test, item_x_range
+from penultimate_cut.ui.titles import paint_title
 
 RULER_HEIGHT = 20
 TRACK_TOP = RULER_HEIGHT
@@ -254,6 +264,8 @@ class _TimelineCanvas(QWidget):
         only ever replaced whole."""
         self._waveforms: dict[Path, Waveform | None] = {}
         self._pending_waveforms: set[Path] = set()
+        self._title_tiles: dict[tuple[Title, int, int], QPixmap] = {}
+        """Small pictures of title cards, drawn right here (no worker needed)."""
         self._signals = _AsyncSignals()
         self._signals.frame_ready.connect(self._on_frame_ready)
         self._signals.waveform_ready.connect(self._on_waveform_ready)
@@ -317,13 +329,29 @@ class _TimelineCanvas(QWidget):
         self.selection_changed.emit(None)
         self.update()
 
-    def insert_clip(self, item: TrackItem, index: int | None = None) -> None:
+    def insert_clip(self, item: TrackItem, index: int | None = None, text: str = "Insert") -> None:
         track = self.track
         if self._project is None or self._undo_stack is None or track is None:
             return
         target = len(track.items) if index is None else index
-        self._undo_stack.push(InsertCommand(self._project, self._track_index, target, item))
+        self._undo_stack.push(InsertCommand(self._project, self._track_index, target, item, text))
         self.update()
+
+    def select(self, index: int | None) -> None:
+        self._select(index)
+
+    def index_at_playhead(self) -> int:
+        """Where something inserted "at the playhead" goes: before the item
+        under the playhead, or at the end once the playhead is past them all."""
+        track = self.track
+        if track is None:
+            return 0
+        start = Fraction(0)
+        for index, item in enumerate(track.items):
+            if self._playhead < start + item.duration:
+                return index
+            start += item.duration
+        return len(track.items)
 
     def zoom_in(self, anchor_x: float | None = None) -> None:
         self._set_zoom(self._view.pixels_per_second * ZOOM_FACTOR, anchor_x)
@@ -470,7 +498,7 @@ class _TimelineCanvas(QWidget):
         painter.drawText(
             label_rect,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            clip.media_ref.path.name + (" · muted" if clip.muted else ""),
+            clip.media_ref.display_name + (" · muted" if clip.muted else ""),
         )
 
     def _paint_fades(self, painter: QPainter, rect: QRect, clip: Clip) -> None:
@@ -499,6 +527,9 @@ class _TimelineCanvas(QWidget):
         media = clip.media_ref
         if not media.has_video:
             return
+        if media.title is not None:
+            self._paint_title_tiles(painter, rect, media.title)
+            return
         tile_width = _tile_width(_aspect(clip))
         tile_seconds = fraction_from_seconds(tile_width) / self._view.pixels_per_second
         grid = _grid_seconds(tile_seconds * clip.speed)
@@ -525,6 +556,37 @@ class _TimelineCanvas(QWidget):
                 target = QRectF(x, rect.y(), tile_width, FILMSTRIP_HEIGHT)
                 painter.drawPixmap(target, pixmap, QRectF(pixmap.rect()))
         painter.restore()
+
+    def _paint_title_tiles(self, painter: QPainter, rect: QRect, title: Title) -> None:
+        """The title card itself, at the video's shape, repeated like a
+        filmstrip."""
+        width, height = auto_resolution(self._project) if self._project else (16, 9)
+        tile_width = _tile_width(Fraction(width, height))
+        pixmap = self._title_tile(title, round(tile_width * 2), FRAME_IMAGE_HEIGHT)
+        first = max(0, int(-rect.x() // tile_width))
+        last = min(
+            math.ceil(rect.width() / tile_width), int((self.width() - rect.x()) // tile_width) + 1
+        )
+        painter.save()
+        painter.setClipRect(rect)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        for tile in range(first, last):
+            target = QRectF(rect.x() + tile * tile_width, rect.y(), tile_width, FILMSTRIP_HEIGHT)
+            painter.drawPixmap(target, pixmap, QRectF(pixmap.rect()))
+        painter.restore()
+
+    def _title_tile(self, title: Title, width: int, height: int) -> QPixmap:
+        key = (title, width, height)
+        pixmap = self._title_tiles.get(key)
+        if pixmap is None:
+            if len(self._title_tiles) > 100:
+                self._title_tiles.clear()  # only edited-away titles pile up
+            pixmap = QPixmap(width, height)
+            tile_painter = QPainter(pixmap)
+            paint_title(tile_painter, QRectF(0, 0, width, height), title)
+            tile_painter.end()
+            self._title_tiles[key] = pixmap
+        return pixmap
 
     def _paint_waveform(self, painter: QPainter, rect: QRect, clip: Clip) -> None:
         media = clip.media_ref
@@ -900,7 +962,7 @@ def item_tooltip(item: TrackItem) -> str:
             f"Empty space ({_length(item.duration)}): plays as black and silence.\n"
             "Right-click to delete it."
         )
-    lines = [item.media_ref.path.name]
+    lines = [item.media_ref.display_name]
     if not item.media_ref.is_still_image:
         start, end = format_duration(item.source_in), format_duration(item.source_out)
         lines.append(f"Uses {start}–{end} of the original")
@@ -992,8 +1054,14 @@ class TimelineWidget(QWidget):
         if index is not None:
             self._canvas.delete_clip(index, close_gap=close_gap)
 
-    def insert_clip(self, item: TrackItem, index: int | None = None) -> None:
-        self._canvas.insert_clip(item, index)
+    def insert_clip(self, item: TrackItem, index: int | None = None, text: str = "Insert") -> None:
+        self._canvas.insert_clip(item, index, text)
+
+    def select(self, index: int | None) -> None:
+        self._canvas.select(index)
+
+    def index_at_playhead(self) -> int:
+        return self._canvas.index_at_playhead()
 
     def zoom_in(self) -> None:
         self._canvas.zoom_in()

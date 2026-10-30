@@ -11,7 +11,7 @@ from fractions import Fraction
 from typing import Literal
 from uuid import uuid4
 
-from penultimate_cut.model.project import MAX_VOLUME, Clip, FitMode, Gap, Track, TrackItem
+from penultimate_cut.model.project import MAX_VOLUME, Clip, FitMode, Gap, Title, Track, TrackItem
 
 
 class TimelineOpError(ValueError):
@@ -173,6 +173,19 @@ def set_clip_options(
         fade_in=item.fade_in if fade_in is None else fade_in,
         fade_out=item.fade_out if fade_out is None else fade_out,
     )
+    new_items = [*track.items[:index], new_item, *track.items[index + 1 :]]
+    return replace(track, items=new_items)
+
+
+def set_title(track: Track, index: int, title: Title) -> Track:
+    """Change a title card's text or colors. The clip gets its own new media
+    reference, so the other half of a split title keeps its text."""
+    _check_index(track, index)
+    item = track.items[index]
+    if not isinstance(item, Clip) or not item.media_ref.is_title:
+        raise TimelineOpError("only a title card has a title to change")
+    new_media = replace(item.media_ref, title=title, id=uuid4().hex)
+    new_item = replace(item, media_ref=new_media)
     new_items = [*track.items[:index], new_item, *track.items[index + 1 :]]
     return replace(track, items=new_items)
 
