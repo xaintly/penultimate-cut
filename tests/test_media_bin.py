@@ -2,7 +2,7 @@ import time
 from fractions import Fraction
 from pathlib import Path
 
-from PySide6.QtCore import QSize, QUrl
+from PySide6.QtCore import QPoint, QPointF, QSize, Qt, QUrl
 from PySide6.QtWidgets import QListWidget
 
 from penultimate_cut.model.project import MediaRef
@@ -242,6 +242,10 @@ def test_list_items_do_not_move_freely(qapp) -> None:
     media_bin = MediaBin()
     try:
         assert media_bin._list.movement() == QListWidget.Movement.Static
+        # setMovement(Static) also switches these off; moving items within
+        # the bin needs them back on, after it.
+        assert media_bin._list.dragEnabled()
+        assert media_bin._list.viewport().acceptDrops()
     finally:
         media_bin.shutdown()
 
@@ -296,3 +300,83 @@ def test_thumbnail_icons_keep_the_pictures_shape(qapp, make_still_image) -> None
     landscape = thumbnail_icon(make_still_image("mb_landscape.png", size="320x180"))
     edge = landscape.pixmap(QSize(*_ICON_SIZE)).toImage().pixelColor(2, _ICON_SIZE[1] // 2)
     assert edge.alpha() == 255  # fills the width
+
+
+class _StubInternalDropEvent:
+    """A drop of an item dragged within the list itself (Qt sets `source()`
+    only for real drags, so this stands in for one)."""
+
+    def __init__(self, source: object, pos: QPointF) -> None:
+        self._source = source
+        self._pos = pos
+        self.drop_action: Qt.DropAction | None = None
+        self.accepted = False
+
+    def source(self) -> object:
+        return self._source
+
+    def position(self) -> QPointF:
+        return self._pos
+
+    def mimeData(self) -> _StubMimeData:
+        return _StubMimeData([])
+
+    def setDropAction(self, action: Qt.DropAction) -> None:
+        self.drop_action = action
+
+    def accept(self) -> None:
+        self.accepted = True
+
+
+def _bin_names(media_bin: MediaBin) -> list[str]:
+    return [
+        media_bin._list.item(row).text().split("\n")[0] for row in range(media_bin._list.count())
+    ]
+
+
+def test_dragging_an_entry_within_the_bin_moves_it_between_others(qapp, make_still_image) -> None:
+    media_bin = MediaBin()
+    try:
+        media_bin.resize(800, 300)
+        media_bin.show()
+        for name in ("mb_order_a.png", "mb_order_b.png", "mb_order_c.png"):
+            media_bin.import_files([make_still_image(name)])
+            assert pump_until(qapp, lambda n=name: n in _bin_names(media_bin))
+        assert _bin_names(media_bin) == ["mb_order_a.png", "mb_order_b.png", "mb_order_c.png"]
+        listing = media_bin._list
+
+        # Drop "a" on the right half of "c": it goes after "c".
+        listing.setCurrentRow(0)
+        rect_c = listing.visualItemRect(listing.item(2))
+        event = _StubInternalDropEvent(listing, QPointF(rect_c.right() - 5, rect_c.center().y()))
+        listing.dropEvent(event)  # type: ignore[arg-type]
+        assert _bin_names(media_bin) == ["mb_order_b.png", "mb_order_c.png", "mb_order_a.png"]
+        assert event.accepted
+        # Copy, not Move: Qt deletes the dragged item after a Move.
+        assert event.drop_action == Qt.DropAction.CopyAction
+        assert listing.currentRow() == 2
+
+        # Drop it back on the left half of "b": it goes before "b".
+        rect_b = listing.visualItemRect(listing.item(0))
+        listing.dropEvent(
+            _StubInternalDropEvent(listing, QPointF(rect_b.left() + 5, rect_b.center().y()))
+        )  # type: ignore[arg-type]
+        assert _bin_names(media_bin) == ["mb_order_a.png", "mb_order_b.png", "mb_order_c.png"]
+        assert len(media_bin.entries) == 3
+    finally:
+        media_bin.shutdown()
+
+
+def test_drop_position_past_the_last_entry_means_the_end(qapp, make_still_image) -> None:
+    media_bin = MediaBin()
+    try:
+        media_bin.resize(800, 300)
+        media_bin.show()
+        media_bin.import_files([make_still_image("mb_end_a.png")])
+        assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
+        listing = media_bin._list
+        rect = listing.visualItemRect(listing.item(0))
+        assert listing.insert_row_at(QPoint(rect.right() + 400, rect.center().y())) == 1
+        assert listing.insert_row_at(rect.topLeft()) == 0
+    finally:
+        media_bin.shutdown()

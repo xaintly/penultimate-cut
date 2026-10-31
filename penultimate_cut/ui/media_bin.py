@@ -17,10 +17,12 @@ the other way to do the same thing.
 
 The list uses `Movement.Static`: `QListView`'s default for `IconMode` is
 free placement (drag an icon anywhere in the box, like arranging shapes in
-a photo editor), which has no purpose here -- the bin has no concept of a
-meaningful order -- and just looks broken. Static keeps items laid out in
-import order while leaving the *outgoing* drag (a completely independent
-Qt setting from in-view movement) untouched.
+a photo editor), which just looks broken. Static keeps items on their grid
+while leaving the *outgoing* drag (a completely independent Qt setting from
+in-view movement) untouched. Dragging an item within the bin moves it
+between the others instead -- see `_MediaListWidget` -- which only changes
+how the bin looks: the bin's order isn't part of the project (opening one
+fills the bin in timeline order), so it isn't an undoable edit either.
 """
 
 from __future__ import annotations
@@ -30,7 +32,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QMimeData, QObject, QPoint, QSize, Qt, Signal
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QPainter, QPixmap
+from PySide6.QtGui import (
+    QDragEnterEvent,
+    QDragLeaveEvent,
+    QDragMoveEvent,
+    QDropEvent,
+    QIcon,
+    QPainter,
+    QPaintEvent,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QFileDialog,
     QListWidget,
@@ -73,7 +84,109 @@ class _ImportSignals(QObject):
 
 class _MediaListWidget(QListWidget):
     """Overrides outgoing-drag MIME data to carry MEDIA_MIME_TYPE instead of
-    (or alongside) Qt's own internal format -- see module docstring."""
+    (or alongside) Qt's own internal format -- see module docstring.
+
+    Also moves an item dragged within the list to wherever it's dropped,
+    between two others, with a bar showing where it will go. Qt's own
+    internal move does this only in its list (not icon) mode. Files dragged
+    in from outside are passed on through `files_dropped`."""
+
+    files_dropped = Signal(list)  # list[Path]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setViewMode(QListWidget.ViewMode.IconMode)
+        self.setIconSize(QSize(*_ICON_SIZE))
+        self.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.setWordWrap(True)
+        # These two set drag-enabled and the viewport's accept-drops to match
+        # (Static: neither), so they come first and the drag setup after.
+        self.setMovement(QListWidget.Movement.Static)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDropIndicatorShown(False)  # Qt's indicator is for its own modes; see paintEvent
+        self._drop_row: int | None = None
+        """Where a drag within the list would put its item, while one is over it."""
+
+    def insert_row_at(self, pos: QPoint) -> int:
+        """The row an item dropped at `pos` (viewport coordinates) goes to:
+        before the nearest item, or after it if `pos` is past its middle.
+        Nearest means on the nearest line of the grid first."""
+        nearest: tuple[int, int, int] | None = None  # (dy, dx, row)
+        for row in range(self.count()):
+            rect = self.visualItemRect(self.item(row))
+            dx = max(rect.left() - pos.x(), 0, pos.x() - rect.right())
+            dy = max(rect.top() - pos.y(), 0, pos.y() - rect.bottom())
+            if nearest is None or (dy, dx) < nearest[:2]:
+                nearest = (dy, dx, row)
+        if nearest is None:
+            return 0
+        row = nearest[2]
+        return row if pos.x() < self.visualItemRect(self.item(row)).center().x() else row + 1
+
+    def move_row(self, from_row: int, to_row: int) -> None:
+        """Move the item at `from_row` so it lands before whatever is at
+        `to_row` now (`count()` for the end)."""
+        if to_row > from_row:
+            to_row -= 1
+        if to_row == from_row:
+            return
+        item = self.takeItem(from_row)
+        self.insertItem(to_row, item)
+        self.setCurrentItem(item)
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        self.dragMoveEvent(event)
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        if event.source() is self:
+            super().dragMoveEvent(event)  # scrolls a long bin near its edges
+            self._set_drop_row(self.insert_row_at(event.position().toPoint()))
+            event.setDropAction(Qt.DropAction.CopyAction)  # Move would delete the item
+            event.accept()
+        elif event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:
+        super().dragLeaveEvent(event)
+        self._set_drop_row(None)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        self.stopAutoScroll()
+        self._set_drop_row(None)
+        if event.source() is self:
+            if self.currentRow() >= 0:
+                self.move_row(self.currentRow(), self.insert_row_at(event.position().toPoint()))
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+        elif event.mimeData().hasUrls():
+            paths = [
+                Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()
+            ]
+            self.files_dropped.emit(paths)
+            event.acceptProposedAction()
+
+    def _set_drop_row(self, row: int | None) -> None:
+        if row != self._drop_row:
+            self._drop_row = row
+            self.viewport().update()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        super().paintEvent(event)
+        if self._drop_row is None or self.count() == 0:
+            return
+        if self._drop_row < self.count():
+            rect = self.visualItemRect(self.item(self._drop_row))
+            x = rect.left()
+        else:
+            rect = self.visualItemRect(self.item(self.count() - 1))
+            x = rect.right()
+        painter = QPainter(self.viewport())
+        painter.fillRect(x - 1, rect.top(), 3, rect.height(), self.palette().highlight())
+        painter.end()
 
     def mimeData(self, items: list[QListWidgetItem]) -> QMimeData:
         mime = super().mimeData(items)
@@ -106,12 +219,7 @@ class MediaBin(QWidget):
         """Media ids whose entry is still being built on a worker thread."""
 
         self._list = _MediaListWidget()
-        self._list.setViewMode(QListWidget.ViewMode.IconMode)
-        self._list.setIconSize(QSize(*_ICON_SIZE))
-        self._list.setResizeMode(QListWidget.ResizeMode.Adjust)
-        self._list.setMovement(QListWidget.Movement.Static)
-        self._list.setWordWrap(True)
-        self._list.setDragEnabled(True)
+        self._list.files_dropped.connect(self.import_files)
         self._list.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._list.customContextMenuRequested.connect(self._on_context_menu)
