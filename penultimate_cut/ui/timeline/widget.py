@@ -40,7 +40,17 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Literal
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QObject,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QDragEnterEvent,
@@ -119,6 +129,14 @@ first); a screenful is about 2 MB. Frames stay cached on disk regardless."""
 DRAG_THRESHOLD_PX = 4.0
 """How far the mouse has to move, after pressing on a clip body, before a
 click turns into a reorder drag."""
+EDGE_SCROLL_ZONE_PX = 40.0
+"""While moving or trimming a clip, holding the mouse this close to either
+edge of the timeline (or past it) scrolls the view, so a clip can be
+dragged past whatever is off-screen."""
+EDGE_SCROLL_INTERVAL_MS = 30
+EDGE_SCROLL_MAX_STEP_PX = 60
+"""The farther into (or past) the edge zone, the faster the scroll, up to
+this many pixels per tick (about 2000 pixels a second)."""
 
 _TICK_INTERVALS_S = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600]
 _MIN_TICK_SPACING_PX = 50.0
@@ -248,6 +266,9 @@ class _TimelineCanvas(QWidget):
         self._last_mouse_x = 0.0
         self._wheel_zoom = 0
         """Wheel movement not yet turned into a zoom step (120 = one notch)."""
+        self._edge_scroll_timer = QTimer(self)
+        self._edge_scroll_timer.setInterval(EDGE_SCROLL_INTERVAL_MS)
+        self._edge_scroll_timer.timeout.connect(self._on_edge_scroll)
 
         self._frame_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="filmstrip")
         self._waveform_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="waveform")
@@ -272,6 +293,7 @@ class _TimelineCanvas(QWidget):
 
     def shutdown(self) -> None:
         self._closing = True  # also stops an in-progress waveform's ffmpeg
+        self._edge_scroll_timer.stop()
         self._frame_executor.shutdown(wait=False, cancel_futures=True)
         self._waveform_executor.shutdown(wait=False, cancel_futures=True)
         # The stack can outlive this widget, and its destructor emits
@@ -305,6 +327,18 @@ class _TimelineCanvas(QWidget):
         if self._project is None:
             return None
         return self._project.tracks[self._track_index]
+
+    @property
+    def scroll_duration(self) -> Fraction:
+        """How much timeline there is to scroll through. During a trim drag
+        that lengthens the track, the longer of the two, so the new end can
+        be scrolled to -- but never shorter mid-drag: shrinking the scroll
+        range would shift the view under the mouse, moving the edge being
+        dragged, which shrinks the range again."""
+        track = self.track
+        if track is None:
+            return Fraction(0)
+        return max(track.duration, self._preview_track(track).duration)
 
     # --- public editing API -------------------------------------------------------
 
@@ -743,13 +777,16 @@ class _TimelineCanvas(QWidget):
                 self.scroll_requested.emit(int(self._pan.start_px - moved))
             return
         if isinstance(self._drag, _TrimDrag):
+            self.content_changed.emit()
             self.update()
+            self._update_edge_scroll()
             return
         if isinstance(self._drag, _ReorderDrag):
             if not self._drag.armed and abs(x - self._drag.press_x) >= DRAG_THRESHOLD_PX:
                 self._drag.armed = True
             if self._drag.armed:
                 self._update_reorder_target(x)
+                self._update_edge_scroll()
             return
         if event.buttons() & Qt.MouseButton.LeftButton:
             self._scrub_to_x(x)
@@ -767,7 +804,32 @@ class _TimelineCanvas(QWidget):
         elif track is not None and isinstance(self._drag, _ReorderDrag) and self._drag.armed:
             self._commit_reorder(self._drag)
         self._drag = None
+        self._edge_scroll_timer.stop()
+        self.content_changed.emit()  # a lengthening trim may not have happened after all
         self.update()
+
+    def _update_edge_scroll(self) -> None:
+        if edge_scroll_step(self._last_mouse_x, self.width()):
+            if not self._edge_scroll_timer.isActive():
+                self._edge_scroll_timer.start()
+        else:
+            self._edge_scroll_timer.stop()
+
+    def _on_edge_scroll(self) -> None:
+        """A timer tick while a drag is held near an edge: scroll a step and
+        let the drag follow, as though the mouse had moved over the content."""
+        drag = self._drag
+        step = edge_scroll_step(self._last_mouse_x, self.width())
+        if drag is None or (isinstance(drag, _ReorderDrag) and not drag.armed) or not step:
+            self._edge_scroll_timer.stop()
+            return
+        left_px = round(self._view.scroll_offset * self._view.pixels_per_second)
+        self.scroll_requested.emit(left_px + step)
+        if isinstance(drag, _ReorderDrag):
+            self._update_reorder_target(self._last_mouse_x)
+        else:
+            self.content_changed.emit()
+            self.update()
 
     def _scrub_to_x(self, x: float) -> None:
         time = max(Fraction(0), self._view.time_for_x(x))
@@ -815,8 +877,12 @@ class _TimelineCanvas(QWidget):
             return
         drag = self._drag
         assert isinstance(drag, _ReorderDrag)
+        # Past the edge of the view, the clip goes where the view's edge is
+        # (the view scrolls on to bring more into reach); past the last clip,
+        # to the end.
+        x = max(0.0, min(x, self.width() - 1.0))
         hit = hit_test(track, self._view, x)
-        drag.target_index = hit.index if hit is not None else drag.start_index
+        drag.target_index = hit.index if hit is not None else len(track.items) - 1
         self.update()
 
     def _commit_reorder(self, drag: _ReorderDrag) -> None:
@@ -994,6 +1060,21 @@ def _format_tick(time: Fraction) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
+def edge_scroll_step(x: float, width: int) -> int:
+    """Pixels to scroll per tick for a drag held at `x` in a view `width`
+    pixels wide: negative toward the start, positive toward the end, 0 away
+    from the edges."""
+    if x < EDGE_SCROLL_ZONE_PX:
+        depth = EDGE_SCROLL_ZONE_PX - x
+        direction = -1
+    elif x > width - EDGE_SCROLL_ZONE_PX:
+        depth = x - (width - EDGE_SCROLL_ZONE_PX)
+        direction = 1
+    else:
+        return 0
+    return direction * max(2, min(EDGE_SCROLL_MAX_STEP_PX, round(depth / 2)))
+
+
 class TimelineWidget(QWidget):
     playhead_moved = Signal(object)  # Fraction
     selection_changed = Signal(object)  # int | None
@@ -1070,8 +1151,7 @@ class TimelineWidget(QWidget):
         self._canvas.zoom_out()
 
     def _update_scrollbar_range(self) -> None:
-        track = self._canvas.track
-        total_width = self._canvas._view.width_for_duration(track.duration) if track else 0.0
+        total_width = self._canvas._view.width_for_duration(self._canvas.scroll_duration)
         visible_width = self._canvas.width()
         overflow = max(0, int(total_width - visible_width))
         self._scrollbar.setRange(0, overflow)

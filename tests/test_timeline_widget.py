@@ -20,11 +20,13 @@ from penultimate_cut.ui.timeline.widget import (
     _CLIP_BG,
     _PLAYHEAD_COLOR,
     _TRACK_BG,
+    EDGE_SCROLL_MAX_STEP_PX,
     TRACK_TOP,
     TimelineWidget,
     _grid_seconds,
     _tile_source_time,
     _tile_width,
+    edge_scroll_step,
     item_tooltip,
 )
 
@@ -308,6 +310,84 @@ def test_reorder_drag_commits_one_undo_step(qapp, make_video_clip) -> None:
 
         stack.undo()
         assert project.tracks[0].items == [clip_a, clip_b]
+    finally:
+        widget.shutdown()
+
+
+def test_edge_scroll_step_speeds_up_toward_and_past_the_edges() -> None:
+    assert edge_scroll_step(200, 400) == 0
+    assert edge_scroll_step(370, 400) > 0
+    assert edge_scroll_step(399, 400) > edge_scroll_step(370, 400)
+    assert edge_scroll_step(2000, 400) == EDGE_SCROLL_MAX_STEP_PX
+    assert edge_scroll_step(10, 400) < 0
+    assert edge_scroll_step(-2000, 400) == -EDGE_SCROLL_MAX_STEP_PX
+
+
+def test_dragging_a_clip_to_the_edge_scrolls_it_past_off_screen_clips(
+    qapp, make_video_clip
+) -> None:
+    """Held at the right edge, the view keeps scrolling and the dragged clip
+    keeps moving along, so it can go anywhere in one drag."""
+    source = make_video_clip("tlw_edge_scroll.mp4", duration=10.0, fps=30, size="320x240")
+    media = make_media(source)
+    clips = [
+        Clip(media_ref=media, source_in=Fraction(n, 10), source_out=Fraction(3)) for n in range(10)
+    ]
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=list(clips))])
+    stack = QUndoStack()
+
+    widget = TimelineWidget()
+    try:
+        widget.resize(400, 150)
+        widget.set_project(project, stack)
+        widget.show()
+        qapp.processEvents()
+
+        canvas = widget._canvas
+        y = TRACK_TOP + 10
+        left, none = Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
+        QTest.mousePress(canvas, left, none, QPoint(60, y))
+        QTest.mouseMove(canvas, QPoint(200, y))
+        QTest.mouseMove(canvas, QPoint(canvas.width() - 5, y))
+        at_end = widget._scrollbar.maximum()
+        assert at_end > 0
+        assert pump_until(qapp, lambda: widget._scrollbar.value() == at_end)
+        QTest.mouseRelease(canvas, left, none, QPoint(canvas.width() - 5, y))
+        qapp.processEvents()
+
+        assert stack.count() == 1
+        assert project.tracks[0].items[-1] is clips[0]
+        assert not canvas._edge_scroll_timer.isActive()
+    finally:
+        widget.shutdown()
+
+
+def test_dragging_a_clip_past_the_last_one_moves_it_to_the_end(qapp, make_video_clip) -> None:
+    source = make_video_clip("tlw_past_end.mp4", duration=10.0, fps=30, size="320x240")
+    media = make_media(source)
+    clip_a = Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(2))
+    clip_b = Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(3))
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip_a, clip_b])])
+    stack = QUndoStack()
+
+    widget = TimelineWidget()
+    try:
+        widget.resize(800, 150)
+        widget.set_project(project, stack)
+        widget.show()
+        qapp.processEvents()
+
+        canvas = widget._canvas
+        y = TRACK_TOP + 10
+        left, none = Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
+        # clip_a spans 0-100px, clip_b 100-250px; the track ends there.
+        QTest.mousePress(canvas, left, none, QPoint(50, y))
+        QTest.mouseMove(canvas, QPoint(200, y))
+        QTest.mouseMove(canvas, QPoint(500, y))
+        QTest.mouseRelease(canvas, left, none, QPoint(500, y))
+        qapp.processEvents()
+
+        assert project.tracks[0].items == [clip_b, clip_a]
     finally:
         widget.shutdown()
 
