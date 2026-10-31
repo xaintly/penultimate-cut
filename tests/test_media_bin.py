@@ -5,6 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, QPointF, QSize, Qt, QUrl
 from PySide6.QtWidgets import QListWidget
 
+from penultimate_cut.model.media_ops import move_media
 from penultimate_cut.model.project import MediaRef
 from penultimate_cut.ui.media_bin import (
     _ICON_SIZE,
@@ -23,6 +24,31 @@ def pump_until(app, condition, timeout: float = 8.0) -> bool:
             return True
         time.sleep(0.02)
     return False
+
+
+def owned_bin() -> MediaBin:
+    """A bin with something playing the owner's part, as MainWindow does in
+    the app through undoable edits: imports are added to its list, and moves
+    are made."""
+    media_bin = MediaBin()
+    media: list[MediaRef] = []
+
+    def add(media_ref: MediaRef, _batch: int) -> None:
+        media.append(media_ref)
+        media_bin.show_media(media)
+
+    def move(from_index: int, before_index: int) -> None:
+        media[:] = move_media(media, from_index, before_index)
+        media_bin.show_media(media)
+
+    media_bin.media_imported.connect(add)
+    media_bin.move_requested.connect(move)
+    return media_bin
+
+
+def has_thumbnail(media_bin: MediaBin) -> bool:
+    entries = media_bin.entries
+    return len(entries) == 1 and entries[0].thumbnail_path is not None
 
 
 class _StubMimeData:
@@ -50,10 +76,10 @@ class _StubDropEvent:
 
 def test_import_video_file_adds_entry_with_thumbnail(qapp, make_video_clip) -> None:
     source = make_video_clip("mb_video.mp4", duration=2.0, fps=30, size="320x240")
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     try:
         media_bin.import_files([source])
-        assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
+        assert pump_until(qapp, lambda: has_thumbnail(media_bin))
 
         entry = media_bin.entries[0]
         assert entry.media_ref.path == source
@@ -68,7 +94,7 @@ def test_import_video_file_adds_entry_with_thumbnail(qapp, make_video_clip) -> N
 
 def test_import_audio_only_file_has_no_thumbnail(qapp, make_audio_clip) -> None:
     source = make_audio_clip("mb_audio.m4a", duration=2.0)
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     try:
         media_bin.import_files([source])
         assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
@@ -82,10 +108,10 @@ def test_import_audio_only_file_has_no_thumbnail(qapp, make_audio_clip) -> None:
 
 def test_import_still_image_is_labeled_as_image(qapp, make_still_image) -> None:
     source = make_still_image("mb_still.png", size="320x240")
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     try:
         media_bin.import_files([source])
-        assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
+        assert pump_until(qapp, lambda: has_thumbnail(media_bin))
 
         entry = media_bin.entries[0]
         assert entry.media_ref.is_still_image
@@ -96,7 +122,7 @@ def test_import_still_image_is_labeled_as_image(qapp, make_still_image) -> None:
 
 
 def test_import_nonexistent_file_adds_failed_placeholder(qapp, tmp_path: Path) -> None:
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     try:
         missing = tmp_path / "does_not_exist.mp4"
         media_bin.import_files([missing])
@@ -110,22 +136,31 @@ def test_import_nonexistent_file_adds_failed_placeholder(qapp, tmp_path: Path) -
         media_bin.shutdown()
 
 
-def test_media_added_signal_fires_with_entry(qapp, make_video_clip) -> None:
-    source = make_video_clip("mb_signal.mp4", duration=1.0, fps=30, size="320x240")
+def test_imports_are_asked_for_not_listed_by_the_bin_itself(qapp, make_video_clip) -> None:
+    """The bin shows the project's media; adding to it is the owner's edit.
+    Files imported together come with the same batch number."""
+    first = make_video_clip("mb_signal_a.mp4", duration=1.0, fps=30, size="320x240")
+    second = make_video_clip("mb_signal_b.mp4", duration=1.0, fps=30, size="320x240")
     media_bin = MediaBin()
-    received: list[MediaBinEntry] = []
-    media_bin.media_added.connect(received.append)
+    received: list[tuple[MediaRef, int]] = []
+    media_bin.media_imported.connect(lambda media_ref, batch: received.append((media_ref, batch)))
     try:
-        media_bin.import_files([source])
-        assert pump_until(qapp, lambda: len(received) == 1)
-        assert received[0].media_ref.path == source
+        media_bin.import_files([first, second])
+        assert pump_until(qapp, lambda: len(received) == 2)
+        assert {media_ref.path for media_ref, _ in received} == {first, second}
+        assert received[0][1] == received[1][1]
+        assert media_bin.entries == []
+
+        media_bin.import_files([first])
+        assert pump_until(qapp, lambda: len(received) == 3)
+        assert received[2][1] != received[0][1]
     finally:
         media_bin.shutdown()
 
 
 def test_double_click_emits_media_double_clicked(qapp, make_video_clip) -> None:
     source = make_video_clip("mb_dclick.mp4", duration=1.0, fps=30, size="320x240")
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     received: list[MediaBinEntry] = []
     media_bin.media_double_clicked.connect(received.append)
     try:
@@ -143,7 +178,7 @@ def test_double_click_emits_media_double_clicked(qapp, make_video_clip) -> None:
 
 
 def test_drag_enter_with_urls_accepts(qapp, tmp_path: Path) -> None:
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     try:
         event = _StubDropEvent([QUrl.fromLocalFile(str(tmp_path / "x.mp4"))])
         media_bin.dragEnterEvent(event)
@@ -153,7 +188,7 @@ def test_drag_enter_with_urls_accepts(qapp, tmp_path: Path) -> None:
 
 
 def test_drag_enter_without_urls_does_not_accept(qapp) -> None:
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     try:
         event = _StubDropEvent([])
         media_bin.dragEnterEvent(event)
@@ -164,7 +199,7 @@ def test_drag_enter_without_urls_does_not_accept(qapp) -> None:
 
 def test_drop_event_imports_dropped_files(qapp, make_video_clip) -> None:
     source = make_video_clip("mb_drop.mp4", duration=1.0, fps=30, size="320x240")
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     try:
         event = _StubDropEvent([QUrl.fromLocalFile(str(source))])
         media_bin.dropEvent(event)
@@ -177,7 +212,7 @@ def test_drop_event_imports_dropped_files(qapp, make_video_clip) -> None:
 
 def test_clear_removes_all_entries(qapp, make_video_clip) -> None:
     source = make_video_clip("mb_clear.mp4", duration=1.0, fps=30, size="320x240")
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     try:
         media_bin.import_files([source])
         assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
@@ -190,7 +225,7 @@ def test_clear_removes_all_entries(qapp, make_video_clip) -> None:
         media_bin.shutdown()
 
 
-def test_add_media_ref_skips_probing_but_still_generates_thumbnail(qapp, make_video_clip) -> None:
+def test_show_media_lists_it_and_makes_its_thumbnail(qapp, make_video_clip) -> None:
     source = make_video_clip("mb_add_ref.mp4", duration=2.0, fps=30, size="320x240")
     media_ref = MediaRef(
         path=source,
@@ -202,10 +237,12 @@ def test_add_media_ref_skips_probing_but_still_generates_thumbnail(qapp, make_vi
         width=320,
         height=240,
     )
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     try:
-        media_bin.add_media_ref(media_ref)
-        assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
+        media_bin.show_media([media_ref])
+        assert len(media_bin.entries) == 1  # straight away; the thumbnail follows
+        assert media_bin._list.count() == 1
+        assert pump_until(qapp, lambda: has_thumbnail(media_bin))
 
         entry = media_bin.entries[0]
         assert entry.media_ref is media_ref
@@ -215,7 +252,7 @@ def test_add_media_ref_skips_probing_but_still_generates_thumbnail(qapp, make_vi
         media_bin.shutdown()
 
 
-def test_add_media_ref_is_a_noop_for_an_already_present_id(qapp, make_video_clip) -> None:
+def test_show_media_leaves_the_list_alone_when_nothing_changed(qapp, make_video_clip) -> None:
     source = make_video_clip("mb_add_ref_dup.mp4", duration=1.0, fps=30, size="320x240")
     media_ref = MediaRef(
         path=source,
@@ -225,21 +262,35 @@ def test_add_media_ref_is_a_noop_for_an_already_present_id(qapp, make_video_clip
         has_video=True,
         has_audio=True,
     )
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     try:
-        media_bin.add_media_ref(media_ref)
-        assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
+        media_bin.show_media([media_ref])
+        assert pump_until(qapp, lambda: has_thumbnail(media_bin))
+        item = media_bin._list.item(0)
+        media_bin._list.setCurrentItem(item)
 
-        media_bin.add_media_ref(media_ref)
-        qapp.processEvents()
+        media_bin.show_media([media_ref])
 
+        assert media_bin._list.item(0) is item
         assert len(media_bin.entries) == 1
+
+        other = MediaRef(
+            path=source,
+            relative_path=None,
+            duration=Fraction(1),
+            frame_rate=Fraction(30),
+            has_video=True,
+            has_audio=True,
+        )
+        media_bin.show_media([other, media_ref])
+        assert [e.media_ref for e in media_bin.entries] == [other, media_ref]
+        assert media_bin._list.currentRow() == 1  # still the same entry selected
     finally:
         media_bin.shutdown()
 
 
 def test_list_items_do_not_move_freely(qapp) -> None:
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     try:
         assert media_bin._list.movement() == QListWidget.Movement.Static
         # setMovement(Static) also switches these off; moving items within
@@ -252,7 +303,7 @@ def test_list_items_do_not_move_freely(qapp) -> None:
 
 def test_dragging_an_entry_carries_its_media_id(qapp, make_video_clip) -> None:
     source = make_video_clip("mb_drag.mp4", duration=1.0, fps=30, size="320x240")
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     try:
         media_bin.import_files([source])
         assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
@@ -269,20 +320,20 @@ def test_dragging_an_entry_carries_its_media_id(qapp, make_video_clip) -> None:
 
 def test_get_looks_up_an_entry_by_media_id(qapp, make_video_clip) -> None:
     source = make_video_clip("mb_get.mp4", duration=1.0, fps=30, size="320x240")
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     try:
         media_bin.import_files([source])
         assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
         entry = media_bin.entries[0]
 
-        assert media_bin.get(entry.media_ref.id) is entry
+        assert media_bin.get(entry.media_ref.id) == entry
         assert media_bin.get("no-such-id") is None
     finally:
         media_bin.shutdown()
 
 
 def test_shutdown_is_safe_to_call(qapp) -> None:
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     media_bin.shutdown()  # must not raise or hang
 
 
@@ -335,7 +386,7 @@ def _bin_names(media_bin: MediaBin) -> list[str]:
 
 
 def test_dragging_an_entry_within_the_bin_moves_it_between_others(qapp, make_still_image) -> None:
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     try:
         media_bin.resize(800, 300)
         media_bin.show()
@@ -363,12 +414,21 @@ def test_dragging_an_entry_within_the_bin_moves_it_between_others(qapp, make_sti
         )  # type: ignore[arg-type]
         assert _bin_names(media_bin) == ["mb_order_a.png", "mb_order_b.png", "mb_order_c.png"]
         assert len(media_bin.entries) == 3
+
+        # Dropping it where it already is asks for nothing.
+        moves: list[tuple[int, int]] = []
+        media_bin.move_requested.connect(lambda f, b: moves.append((f, b)))
+        listing.setCurrentRow(0)
+        listing.dropEvent(
+            _StubInternalDropEvent(listing, QPointF(rect_b.right() - 5, rect_b.center().y()))
+        )  # type: ignore[arg-type]
+        assert moves == []
     finally:
         media_bin.shutdown()
 
 
 def test_drop_position_past_the_last_entry_means_the_end(qapp, make_still_image) -> None:
-    media_bin = MediaBin()
+    media_bin = owned_bin()
     try:
         media_bin.resize(800, 300)
         media_bin.show()

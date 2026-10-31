@@ -3,6 +3,7 @@ from fractions import Fraction
 
 from PySide6.QtTest import QTest
 
+from penultimate_cut.io.otio_io import load_project, save_project
 from penultimate_cut.model.project import Clip, Gap, Title
 from penultimate_cut.ui.main_window import MainWindow
 
@@ -100,7 +101,7 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
 
         assert len(window.project.tracks[0].items) == 1
         assert window.project.tracks[0].items[0].media_ref.path == source
-        assert window.undo_stack.count() == 1
+        assert window.undo_stack.count() == 2  # the import, then the insert
         assert pump_until(qapp, lambda: window.preview.player.duration is not None)
         assert window.preview.player.duration == Fraction(4)
 
@@ -114,7 +115,7 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         blurred_index = window.clip_properties._fit_mode_combo.findData("blurred_background")
         window.clip_properties._fit_mode_combo.setCurrentIndex(blurred_index)
         assert window.project.tracks[0].items[0].fit_mode == "blurred_background"
-        assert window.undo_stack.count() == 2
+        assert window.undo_stack.count() == 3
 
         window.undo_stack.undo()
         assert window.project.tracks[0].items[0].fit_mode == "black_bars"
@@ -145,7 +146,7 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         window.timeline.set_playhead(Fraction(2))
         window._split_button.click()
         assert len(window.project.tracks[0].items) == 2
-        assert window.undo_stack.count() == 3
+        assert window.undo_stack.count() == 4
 
         # Delete button, on the selected (first) piece: leaves empty space
         # behind (Movie Maker style), rather than closing the gap.
@@ -154,7 +155,7 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         assert len(window.project.tracks[0].items) == 2
         assert isinstance(window.project.tracks[0].items[0], Gap)
         assert window.project.tracks[0].items[0].duration == Fraction(2)
-        assert window.undo_stack.count() == 4
+        assert window.undo_stack.count() == 5
 
         # Undo/redo via the stack directly (the shortcuts just call these
         # same methods; already checked structurally above).
@@ -168,7 +169,7 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         window._delete_button.click()
         assert len(window.project.tracks[0].items) == 1
         assert window.project.tracks[0].items[0].duration == Fraction(2)
-        assert window.undo_stack.count() == 5
+        assert window.undo_stack.count() == 6
 
         # Edit > Delete Clip acts on the clip under the playhead; greyed out
         # when the playhead isn't over one (checked as the menu opens).
@@ -254,12 +255,16 @@ def test_removing_media_from_the_bin(qapp, make_video_clip, monkeypatch) -> None
 
             return confirm
 
-        # Not on the timeline: removed silently, nothing to undo.
+        # Not on the timeline: removed without asking, as an undoable edit.
         monkeypatch.setattr(window, "_confirm_remove_used_media", answer(True))
         window._on_media_remove_requested(unused_entry)
         assert asked == []
         assert window.media_bin.get(unused_entry.media_ref.id) is None
-        assert window.undo_stack.count() == 1  # just the insert
+        assert [m.path.name for m in window.project.media] == ["mw_used.mp4"]
+        assert window._undo_action.text() == "Undo Remove media"
+        window._undo_action.trigger()
+        assert window.media_bin.get(unused_entry.media_ref.id) is not None
+        window._redo_action.trigger()
 
         # On the timeline, and the user cancels: nothing changes.
         monkeypatch.setattr(window, "_confirm_remove_used_media", answer(False))
@@ -320,15 +325,47 @@ def test_adding_and_editing_a_title(qapp, make_video_clip, monkeypatch, tmp_path
         assert window.project.tracks[0].items[0].media_ref.title == Title(text="So Simple")
         assert len(window.project.tracks[0].items) == 3  # nothing was split
         assert not window.preview.player.is_playing
-        assert window.undo_stack.count() == 4  # insert, title, title, one text edit
+        assert window.undo_stack.count() == 5  # import, insert, title, title, one text edit
 
         # Titles never show up in the media bin.
-        window._populate_media_bin_from_project(window.project)
+        assert len(window.project.media) == 1
         assert len(window.media_bin.entries) == 1
 
         window._undo_action.trigger()
         assert window.project.tracks[0].items[0].media_ref.title == Title()
         assert panel._title_text.toPlainText() == "Your Title"
+    finally:
+        window.undo_stack.setClean()
+        window.close()
+        qapp.processEvents()
+
+
+def test_the_media_bin_is_part_of_the_project(qapp, make_video_clip, tmp_path) -> None:
+    """Imports and reorders are undoable edits of the project's own list, and
+    it's saved with the project -- unused media included."""
+    first = make_video_clip("mw_bin_first.mp4", duration=1.0, fps=30, size="320x240")
+    second = make_video_clip("mw_bin_second.mp4", duration=1.0, fps=30, size="320x240")
+    window = MainWindow(vo="null")
+    try:
+        window.media_bin.import_files([first, second])
+        assert pump_until(qapp, lambda: len(window.project.media) == 2)
+        assert window.undo_stack.count() == 1  # one import, however many files
+        order = [m.path.name for m in window.project.media]
+        assert [e.media_ref.path.name for e in window.media_bin.entries] == order
+
+        window.media_bin.move_requested.emit(0, 2)
+        assert [m.path.name for m in window.project.media] == order[::-1]
+        assert [e.media_ref.path.name for e in window.media_bin.entries] == order[::-1]
+        assert window._undo_action.text() == "Undo Move media"
+
+        project_path = tmp_path / "bin.otio"
+        save_project(window.project, project_path)
+        assert [m.path.name for m in load_project(project_path).project.media] == order[::-1]
+
+        window._undo_action.trigger()
+        assert [e.media_ref.path.name for e in window.media_bin.entries] == order
+        window._undo_action.trigger()
+        assert window.media_bin.entries == []
     finally:
         window.undo_stack.setClean()
         window.close()

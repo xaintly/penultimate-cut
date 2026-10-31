@@ -95,6 +95,7 @@ penultimate_cut/
   model/                 # pure Python, NO Qt imports, NO subprocess
     project.py           # Project, Track, Clip, MediaRef dataclasses
     timeline_ops.py      # split, trim, move, delete, ripple — pure functions
+    media_ops.py         # the media bin (Project.media): add, move, remove — pure functions
     time.py              # rational timestamps (see "Time" below)
   commands/              # QUndoCommand subclasses wrapping timeline_ops
   io/
@@ -154,8 +155,18 @@ vendor/                  # ffmpeg.exe, ffprobe.exe, libmpv-2.dll (gitignored; fe
 - App-specific data (fades, normalize, titles, blur regions, export settings) lives in
   `metadata["penultimate_cut"]` with a `schema_version` integer. Write a migration whenever
   the schema changes.
-- **Autosave** every 60 seconds (and on export start) to `<project>.otio.autosave`.
-  On launch, if an autosave is newer than its project, offer to recover it.
+- **The media bin is part of the project** (`Project.media`, in the user's order, used
+  on the timeline or not; schema 5). Importing, reordering (drag within the bin), and
+  removing media are undoable edits like any other. Loading adds anything the timeline
+  uses that the bin doesn't list, so older files get a bin of their timeline's media.
+- **Autosave** a few seconds after each edit, every 60 seconds regardless, and on export
+  start, to `<project>.otio.autosave` (a never-saved project: a fixed slot in
+  `%LOCALAPPDATA%\PenultimateCut\autosave`). Saving, choosing Discard, undoing back to the
+  saved state, or exiting normally deletes it, so only a crash leaves one behind. On
+  launch, offer to recover what a crash left unsaved: the never-saved project, or the
+  saved project autosaved most recently (listed in the autosave folder, since its autosave
+  is beside it). Opening a project whose autosave is newer also offers it. Recovered
+  work stays marked unsaved until the user saves.
 - **Default folder:** `Videos\PenultimateCut` (the user's Videos folder as Windows
   reports it, since it can be moved), created on first use. New projects are saved
   there; exports default to `<project name>.mp4` next to the project, never
@@ -217,9 +228,10 @@ space**. Selecting empty space and pressing Delete also closes it.
 
 On the timeline, **right-click and drag** scrolls (the content follows the mouse);
 a right-click without dragging opens the menu. Left-drag stays reserved for moving
-and trimming clips. In the media bin, Delete or right-click → **Remove from project**
-removes media: silently if no clip uses it, otherwise after a confirmation (its clips
-may be off-screen), as one undoable edit. Right-click a clip → **Delete clip**, or
+and trimming clips. Dragging a clip near either edge of the timeline (or past it)
+scrolls it. In the media bin, drag an item between two others to reorder it; Delete or
+right-click → **Remove from project** removes media: without asking if no clip uses it,
+otherwise after a confirmation (its clips may be off-screen), as one undoable edit. Right-click a clip → **Delete clip**, or
 **Edit → Delete Clip** for the clip under the playhead (greyed out when there's none);
 both leave empty space, like Delete. **Delete and close gap** (right-click, Edit menu)
 is the same with later clips moving up, like Shift+Delete. Hovering over a clip shows a

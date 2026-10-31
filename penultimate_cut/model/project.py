@@ -153,8 +153,12 @@ class Track:
 class Project:
     frame_rate: Rate
     tracks: list[Track] = field(default_factory=list)
+    media: list[MediaRef] = field(default_factory=list)
+    """The media bin, in the user's order: every imported file, whether or
+    not it's on the timeline yet. Title cards aren't here; they exist only
+    as clips. See model/media_ops.py."""
     name: str = "Untitled"
-    schema_version: int = 4  # io/otio_io.py's SCHEMA_VERSION
+    schema_version: int = 5  # io/otio_io.py's SCHEMA_VERSION
 
     @property
     def duration(self) -> Fraction:

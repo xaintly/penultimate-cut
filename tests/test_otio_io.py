@@ -3,7 +3,12 @@ from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 
-from penultimate_cut.io.otio_io import find_relink_candidates, load_project, save_project
+from penultimate_cut.io.otio_io import (
+    SCHEMA_VERSION,
+    find_relink_candidates,
+    load_project,
+    save_project,
+)
 from penultimate_cut.model.project import (
     Clip,
     Gap,
@@ -257,14 +262,16 @@ def test_loading_a_version_1_project_remeasures_media_at_display_size(
         Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip])]), project_path
     )
     text = project_path.read_text(encoding="utf-8")
-    assert '"schema_version": 4' in text
-    project_path.write_text(text.replace('"schema_version": 4', '"schema_version": 1'), "utf-8")
+    assert f'"schema_version": {SCHEMA_VERSION}' in text
+    project_path.write_text(
+        text.replace(f'"schema_version": {SCHEMA_VERSION}', '"schema_version": 1'), "utf-8"
+    )
 
     loaded = load_project(project_path).project
 
     loaded_media = loaded.tracks[0].items[0].media_ref
     assert (loaded_media.width, loaded_media.height) == (240, 320)
-    assert loaded.schema_version == 4
+    assert loaded.schema_version == SCHEMA_VERSION
 
 
 def test_loading_a_version_2_project_converts_volume_db_to_percent(tmp_path: Path) -> None:
@@ -277,7 +284,7 @@ def test_loading_a_version_2_project_converts_volume_db_to_percent(tmp_path: Pat
     # What version 2 wrote: a dB volume, and no fade fields at all.
     text = project_path.read_text(encoding="utf-8")
     for old, new in [
-        ('"schema_version": 4', '"schema_version": 2'),
+        (f'"schema_version": {SCHEMA_VERSION}', '"schema_version": 2'),
         ('"volume": 55', '"volume_db": -6.0206'),
         ('"fade_in": false,', ""),
         ('"fade_out": false,', ""),
@@ -324,3 +331,67 @@ def test_title_cards_round_trip_as_generated_media(tmp_path: Path) -> None:
     assert first.media_ref.id == trimmed.media_ref.id
     assert last.media_ref.title == Title()
     assert first.media_ref.is_still_image and not first.media_ref.has_audio
+
+
+def test_media_bin_round_trips_in_order_with_unused_media(tmp_path: Path) -> None:
+    used = make_media(tmp_path, "used.mp4")
+    unused_a = make_media(tmp_path, "unused_a.mp4")
+    unused_b = make_media(tmp_path, "unused_b.mp4")
+    clip = Clip(media_ref=used, source_in=Fraction(0), source_out=Fraction(2))
+    project = Project(
+        frame_rate=Fraction(30),
+        tracks=[Track(kind="video", items=[clip])],
+        media=[unused_b, used, unused_a],
+    )
+
+    project_path = tmp_path / "project.otio"
+    save_project(project, project_path)
+    loaded = load_project(project_path).project
+
+    assert [m.path.name for m in loaded.media] == ["unused_b.mp4", "used.mp4", "unused_a.mp4"]
+    assert [m.id for m in loaded.media] == [unused_b.id, used.id, unused_a.id]
+    # The bin entry and the clip are the same media, not two copies of it.
+    assert loaded.media[1] is loaded.tracks[0].items[0].media_ref
+    assert loaded.media[2].frame_rate == unused_a.frame_rate
+    assert (loaded.media[2].width, loaded.media[2].height) == (1920, 1080)
+
+
+def test_unused_missing_media_is_reported_too(tmp_path: Path) -> None:
+    unused = make_media(tmp_path, "unused.mp4")
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video")], media=[unused])
+    project_path = tmp_path / "project.otio"
+    save_project(project, project_path)
+    unused.path.unlink()
+
+    result = load_project(project_path)
+
+    assert [m.id for m in result.missing_media] == [unused.id]
+    assert result.project.media == result.missing_media
+
+
+def test_timeline_media_missing_from_the_bin_is_added_to_it(tmp_path: Path) -> None:
+    """A schema 4 file has no bin: it gets one of what its timeline uses, in
+    order of first use, without titles. So does any file whose bin leaves
+    out something on its timeline."""
+    first, second = make_media(tmp_path, "first.mp4"), make_media(tmp_path, "second.mp4")
+    items = [
+        Clip(media_ref=second, source_in=Fraction(0), source_out=Fraction(1)),
+        new_title_clip(),
+        Clip(media_ref=first, source_in=Fraction(0), source_out=Fraction(1)),
+        Clip(media_ref=second, source_in=Fraction(1), source_out=Fraction(2)),
+    ]
+    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=items)])
+    project_path = tmp_path / "project.otio"
+    save_project(project, project_path)
+    text = project_path.read_text("utf-8")
+    assert '"media": []' in text
+    old = text.replace('"media": [],', "").replace(
+        f'"schema_version": {SCHEMA_VERSION}', '"schema_version": 4'
+    )
+    assert old != text
+    project_path.write_text(old, "utf-8")
+
+    loaded = load_project(project_path).project
+
+    assert [m.path.name for m in loaded.media] == ["second.mp4", "first.mp4"]
+    assert loaded.schema_version == SCHEMA_VERSION

@@ -16,6 +16,13 @@ this module never prompts.
 A title card has no file: it's written as an OTIO `GeneratorReference`
 (kind `TITLE_GENERATOR_KIND`) whose parameters are the title's text and
 colors. Other apps see a generated clip of the right length.
+
+The media bin (`Project.media`, in order) is a list under the timeline's
+own metadata, each entry the same fields a clip's media reference carries
+plus its `target_url`. Clips and bin entries for the same file share one
+`MediaRef` once loaded. Anything on the timeline that the bin doesn't list
+(a file from before schema 5, or from another app) is added to the end of
+the bin, so the bin always covers the timeline.
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ from uuid import uuid4
 import opentimelineio as otio
 
 from penultimate_cut.media.probe import ProbeError, probe
+from penultimate_cut.model.media_ops import add_media, timeline_media
 from penultimate_cut.model.project import (
     MAX_VOLUME,
     Clip,
@@ -45,7 +53,7 @@ from penultimate_cut.model.project import (
 from penultimate_cut.model.time import Rate, frame_to_seconds, seconds_to_frame
 
 METADATA_KEY = "penultimate_cut"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 """Version history (bump + add a migration in `_migrate` on every change):
 
 1. Initial.
@@ -54,6 +62,9 @@ SCHEMA_VERSION = 4
 3. Clip `volume` is a percentage (was `volume_db`, converted in
    `_clip_from_otio`); clips gain `fade_in`/`fade_out` (absent = off).
 4. Title cards (`GeneratorReference` media). Nothing to migrate.
+5. The media bin is saved (`media` in the timeline's metadata). Older files
+   get a bin of whatever their timeline uses, in order of first use -- the
+   same rule that covers timeline media missing from any file's bin.
 """
 
 _ADAPTER_NAME = "otio_json"
@@ -141,6 +152,10 @@ def _project_to_timeline(project: Project, path: Path) -> otio.schema.Timeline:
     timeline.metadata[METADATA_KEY] = {
         "schema_version": SCHEMA_VERSION,
         "frame_rate": str(project.frame_rate),
+        "media": [
+            {"target_url": str(media_ref.path), **_media_meta(media_ref, path)}
+            for media_ref in project.media
+        ],
     }
     for track in project.tracks:
         timeline.tracks.append(_track_to_otio(track, project.frame_rate, path))
@@ -158,9 +173,16 @@ def _timeline_to_project(timeline: otio.schema.Timeline, path: Path) -> LoadResu
     missing: dict[str, MediaRef] = {}
     media_cache: dict[str, tuple[MediaRef, bool]] = {}
 
+    # The bin first, so the clips after it pick up the same MediaRefs.
+    for entry in meta.get("media", []):
+        media_ref, _found = _media_ref_from_meta(
+            str(entry.get("target_url", "")), dict(entry), None, path, media_cache
+        )
+        project.media.append(media_ref)
     for otio_track in timeline.tracks:
         track = _track_from_otio(otio_track, frame_rate, path, media_cache)
         project.tracks.append(track)
+    project.media = add_media(project.media, timeline_media(project))
 
     for media_ref, found in media_cache.values():
         if not found:
@@ -332,20 +354,9 @@ def _media_ref_to_otio(
                 "text_color": media_ref.title.text_color,
             },
         )
-        relative_path = None
     else:
-        relative_path = _relative_to(media_ref.path, path)
         ref = otio.schema.ExternalReference(target_url=str(media_ref.path))
-    ref.metadata[METADATA_KEY] = {
-        "media_id": media_ref.id,
-        "relative_path": relative_path,
-        "has_video": media_ref.has_video,
-        "has_audio": media_ref.has_audio,
-        "width": media_ref.width,
-        "height": media_ref.height,
-        "frame_rate": str(media_ref.frame_rate) if media_ref.frame_rate is not None else None,
-        "duration": str(media_ref.duration),
-    }
+    ref.metadata[METADATA_KEY] = _media_meta(media_ref, path)
     rate = media_ref.frame_rate or _FALLBACK_RATE
     ref.available_range = otio.opentime.TimeRange(
         start_time=otio.opentime.RationalTime(0, float(rate)),
@@ -354,34 +365,61 @@ def _media_ref_to_otio(
     return ref
 
 
+def _media_meta(media_ref: MediaRef, path: Path) -> dict:
+    """What's saved about a media file, beside its path."""
+    return {
+        "media_id": media_ref.id,
+        "relative_path": None if media_ref.is_title else _relative_to(media_ref.path, path),
+        "has_video": media_ref.has_video,
+        "has_audio": media_ref.has_audio,
+        "width": media_ref.width,
+        "height": media_ref.height,
+        "frame_rate": str(media_ref.frame_rate) if media_ref.frame_rate is not None else None,
+        "duration": str(media_ref.duration),
+    }
+
+
 def _media_ref_from_otio(
     ref: otio.schema.ExternalReference | otio.schema.GeneratorReference,
     path: Path,
     cache: dict[str, tuple[MediaRef, bool]],
 ) -> tuple[MediaRef, bool]:
     meta = ref.metadata.get(METADATA_KEY, {})
-    media_id = meta.get("media_id")
     if isinstance(ref, otio.schema.GeneratorReference):
-        return _title_from_otio(ref, media_id), True
-    cache_key = media_id or ref.target_url
+        return _title_from_otio(ref, meta.get("media_id")), True
+    return _media_ref_from_meta(ref.target_url, meta, ref.available_range, path, cache)
+
+
+def _media_ref_from_meta(
+    target_url: str,
+    meta: dict,
+    available_range: otio.opentime.TimeRange | None,
+    path: Path,
+    cache: dict[str, tuple[MediaRef, bool]],
+) -> tuple[MediaRef, bool]:
+    """A media file from its saved fields: a clip's media reference, or a
+    bin entry. `available_range` is the fallback for files from other apps,
+    which have none of our fields."""
+    media_id = meta.get("media_id")
+    cache_key = media_id or target_url
     if cache_key in cache:
         return cache[cache_key]
 
     relative_path = meta.get("relative_path")
-    resolved_path, found = _resolve_media_path(ref.target_url, relative_path, path)
+    resolved_path, found = _resolve_media_path(target_url, relative_path, path)
 
     frame_rate: Rate | None
     if "frame_rate" in meta:
         frame_rate = Fraction(meta["frame_rate"]) if meta["frame_rate"] is not None else None
-    elif ref.available_range is not None:
-        frame_rate = Fraction(ref.available_range.start_time.rate).limit_denominator(1_000_000)
+    elif available_range is not None:
+        frame_rate = Fraction(available_range.start_time.rate).limit_denominator(1_000_000)
     else:
         frame_rate = None
 
     if "duration" in meta:
         duration = Fraction(meta["duration"])
-    elif ref.available_range is not None:
-        duration = _from_rational_time(ref.available_range.duration, frame_rate or _FALLBACK_RATE)
+    elif available_range is not None:
+        duration = _from_rational_time(available_range.duration, frame_rate or _FALLBACK_RATE)
     else:
         duration = Fraction(0)
 

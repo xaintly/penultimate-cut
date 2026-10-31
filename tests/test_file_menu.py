@@ -203,12 +203,17 @@ def test_open_project_bad_file_shows_error_and_keeps_current_project(
         qapp.processEvents()
 
 
-def test_new_project_resets_state_and_clears_media_bin(qapp, make_video_clip) -> None:
+def test_new_project_resets_state_and_clears_media_bin(qapp, make_video_clip, monkeypatch) -> None:
     source = make_video_clip("fm_new.mp4", duration=1.0, fps=30, size="320x240")
     window = make_window()
     try:
         window.media_bin.import_files([source])
         assert pump_until(qapp, lambda: len(window.media_bin.entries) == 1)
+        # An import is an unsaved change like any other edit.
+        assert not window.undo_stack.isClean()
+        monkeypatch.setattr(
+            QMessageBox, "warning", lambda *a, **k: QMessageBox.StandardButton.Discard
+        )
 
         window._current_path = Path("/tmp/whatever.otio")
         window._new_project()

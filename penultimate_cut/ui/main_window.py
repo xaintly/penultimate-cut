@@ -3,6 +3,13 @@
 Owns the one `Project` and `QUndoStack` for the open document and wires the
 real widgets together:
 
+- Media bin: the project's own list of media (`Project.media`), shown by
+  the bin in the project's order (`MediaBin.show_media` after every edit).
+  The bin asks; this window makes the edit: a finished import -> an
+  `AddMediaCommand` (files imported together merge into one step), a drag
+  within the bin -> a `MoveMediaCommand`, and Remove -> a
+  `RemoveMediaCommand`, which also removes the media's clips (after a
+  confirmation, when it has any).
 - Media bin double-click -> a default `Clip` for that media, appended to
   the timeline via an `InsertCommand`. Dragging a media bin entry onto the
   timeline does the same thing, landing at wherever was dropped instead of
@@ -42,17 +49,19 @@ real widgets together:
   (`_offer_relink`, matching by filename via `otio_io.find_relink_candidates`)
   before it's displayed, and repopulates the media bin from everything the
   loaded project actually references.
-- Autosave: a `QTimer` writes a snapshot every 60 seconds (skipped while the
-  undo stack is clean -- nothing's changed since the last save, if any) via
-  `io/autosave.py`, plus once more right before an export starts. Launching
-  with a recoverable autosave for a never-saved project, or opening a project
-  whose own autosave is newer than it, offers to load that instead
-  (`_maybe_recover_autosave`) -- recovered content is loaded under the
-  *original* path (or none) but deliberately left dirty, since it was never
-  actually written to that path. A successful explicit save, or the user
-  choosing Discard on the unsaved-changes prompt, discards the autosave: in
-  both cases whatever it would have recovered is now either superseded or
-  explicitly unwanted.
+- Autosave: a snapshot via `io/autosave.py` a few seconds after each edit
+  (`_AUTOSAVE_AFTER_EDIT_MS`, restarted by every edit), every 60 seconds
+  regardless (in case edits never pause), and right before an export starts
+  -- skipped while the undo stack is clean (nothing's changed since the last
+  save, if any). Launching after a crash offers the autosave of whatever was
+  left unsaved: a never-saved project's, or a saved project's (the most
+  recent in `unsaved_projects()`); opening a project whose own autosave is
+  newer than it offers that too (`_maybe_recover_autosave`). Recovered
+  content is loaded under the *original* path (or none) but deliberately
+  left dirty, since it was never actually written to that path. A
+  successful explicit save, choosing Discard on the unsaved-changes prompt,
+  undoing back to the saved state, and a normal exit all discard the
+  autosave: whatever it would have recovered is superseded or unwanted.
 """
 
 from __future__ import annotations
@@ -83,8 +92,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from penultimate_cut.commands.timeline_commands import (
+from penultimate_cut.commands.media_commands import (
+    AddMediaCommand,
+    MoveMediaCommand,
     RemoveMediaCommand,
+)
+from penultimate_cut.commands.timeline_commands import (
     SetClipOptionsCommand,
     SetFitModeCommand,
     SetTitleCommand,
@@ -93,6 +106,7 @@ from penultimate_cut.io.autosave import (
     discard_autosave,
     find_recoverable_autosave,
     load_autosave,
+    unsaved_projects,
     write_autosave,
 )
 from penultimate_cut.io.otio_io import (
@@ -127,6 +141,7 @@ from penultimate_cut.ui.timeline.widget import TimelineWidget
 
 _PROJECT_FILE_FILTER = "Penultimate Cut project (*.otio)"
 _AUTOSAVE_INTERVAL_MS = 60_000
+_AUTOSAVE_AFTER_EDIT_MS = 3_000
 
 
 class MainWindow(QMainWindow):
@@ -210,6 +225,8 @@ class MainWindow(QMainWindow):
 
         self._build_menu()
 
+        self.media_bin.media_imported.connect(self._on_media_imported)
+        self.media_bin.move_requested.connect(self._on_media_move_requested)
         self.media_bin.media_double_clicked.connect(self._on_media_double_clicked)
         self.media_bin.remove_requested.connect(self._on_media_remove_requested)
         self.timeline.media_dropped.connect(self._on_media_dropped)
@@ -231,10 +248,15 @@ class MainWindow(QMainWindow):
         self._autosave_timer.setInterval(_AUTOSAVE_INTERVAL_MS)
         self._autosave_timer.timeout.connect(self._autosave)
         self._autosave_timer.start()
+        self._edit_autosave_timer = QTimer(self)
+        self._edit_autosave_timer.setSingleShot(True)
+        self._edit_autosave_timer.setInterval(_AUTOSAVE_AFTER_EDIT_MS)
+        self._edit_autosave_timer.timeout.connect(self._autosave)
+        self._autosaved = False
+        """Whether this window wrote the autosave that's there now -- only
+        then is it this window's to discard when nothing's left unsaved."""
 
-        recovered = self._maybe_recover_autosave(None)
-        if recovered is not None:
-            self._finish_loading_project(recovered, None, recovered=True)
+        self._recover_at_launch()
 
     # --- menu / shortcuts ---------------------------------------------------------
 
@@ -384,7 +406,6 @@ class MainWindow(QMainWindow):
             return
         fresh = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[])])
         self._load_fresh_project(fresh, path=None)
-        self.media_bin.clear()
 
     def _open_project(self) -> None:
         if not self._confirm_discard_if_dirty():
@@ -419,7 +440,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Couldn't save project", str(exc))
             return False
-        discard_autosave(self._current_path)
+        self._discard_autosave()
         self.undo_stack.setClean()
         self._update_window_title()
         return True
@@ -492,7 +513,7 @@ class MainWindow(QMainWindow):
             return self._save_project()
         # Discard: the user explicitly doesn't want this work recovered
         # later either.
-        discard_autosave(self._current_path)
+        self._discard_autosave()
         return True
 
     # --- shared project-switching plumbing -----------------------------------------
@@ -506,6 +527,8 @@ class MainWindow(QMainWindow):
         self._selected_index = None
         self.timeline.set_project(self.project, self.undo_stack)
         self.timeline.set_playhead(Fraction(0))
+        self.media_bin.clear()
+        self.media_bin.show_media(self.project.media)
         self._reload_preview()
         self.clip_properties.set_clip(None)
         self.undo_stack.setClean()
@@ -526,8 +549,6 @@ class MainWindow(QMainWindow):
         if result.missing_media:
             self._offer_relink(result.missing_media)
         self._load_fresh_project(result.project, path)
-        self.media_bin.clear()
-        self._populate_media_bin_from_project(result.project)
         if recovered:
             # Recovered content was never actually written to `path` (or
             # has no path at all) -- leave it dirty so the usual save
@@ -535,14 +556,33 @@ class MainWindow(QMainWindow):
             # setClean() implying it's already safe on disk.
             self.undo_stack.push(QUndoCommand("Recovered autosave"))
 
+    def _recover_at_launch(self) -> None:
+        """After a crash: offer what was left unsaved -- a never-saved
+        project, or else the saved project autosaved most recently. Any
+        other saved project's autosave stays put, offered when it's opened."""
+        recovered = self._maybe_recover_autosave(None)
+        if recovered is not None:
+            self._finish_loading_project(recovered, None, recovered=True)
+            return
+        for path in unsaved_projects():
+            if find_recoverable_autosave(path) is None:
+                discard_autosave(path)  # stale: saved since, or already gone
+                continue
+            recovered = self._maybe_recover_autosave(path)
+            if recovered is not None:
+                self._finish_loading_project(recovered, path, recovered=True)
+            return
+
     def _maybe_recover_autosave(self, path: Path | None) -> LoadResult | None:
         autosave_path = find_recoverable_autosave(path)
         if autosave_path is None:
             return None
+        what = f"“{path.stem}”" if path is not None else "your new project"
         choice = QMessageBox.question(
             self,
-            "Recover autosave",
-            "A more recent autosave was found for this project. Recover it?",
+            "Recover changes",
+            f"Penultimate Cut closed before your latest changes to {what} were saved."
+            "\n\nRecover them?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if choice != QMessageBox.StandardButton.Yes:
@@ -556,24 +596,20 @@ class MainWindow(QMainWindow):
 
     def _autosave(self) -> None:
         if self.undo_stack.isClean():
+            # Undone back to the saved state: nothing left to recover.
+            if self._autosaved:
+                self._discard_autosave()
             return
         try:
             write_autosave(self.project, self._current_path)
         except OSError:
             pass  # best-effort; a dialog every 60s for a transient disk issue would be worse
+        else:
+            self._autosaved = True
 
-    def _populate_media_bin_from_project(self, project: Project) -> None:
-        seen: set[str] = set()
-        for track in project.tracks:
-            for item in track.items:
-                # Titles aren't media files; they live only on the timeline.
-                if (
-                    isinstance(item, Clip)
-                    and not item.media_ref.is_title
-                    and item.media_ref.id not in seen
-                ):
-                    seen.add(item.media_ref.id)
-                    self.media_bin.add_media_ref(item.media_ref)
+    def _discard_autosave(self) -> None:
+        discard_autosave(self._current_path)
+        self._autosaved = False
 
     def _update_window_title(self) -> None:
         name = self._current_path.name if self._current_path else "Untitled"
@@ -593,6 +629,12 @@ class MainWindow(QMainWindow):
 
     # --- other wiring --------------------------------------------------------------
 
+    def _on_media_imported(self, media_ref: MediaRef, batch: int) -> None:
+        self.undo_stack.push(AddMediaCommand(self.project, [media_ref], batch))
+
+    def _on_media_move_requested(self, from_index: int, before_index: int) -> None:
+        self.undo_stack.push(MoveMediaCommand(self.project, from_index, before_index))
+
     def _on_media_double_clicked(self, entry: MediaBinEntry) -> None:
         self.timeline.insert_clip(default_clip_for(entry.media_ref))
 
@@ -610,9 +652,8 @@ class MainWindow(QMainWindow):
         self._refresh_clip_properties()
         self._update_window_title()
         self._update_edit_actions()
-        # Undoing a "Remove media" brings its clips back; their media must
-        # come back to the bin too. (A no-op for media already there.)
-        self._populate_media_bin_from_project(self.project)
+        self.media_bin.show_media(self.project.media)
+        self._edit_autosave_timer.start()  # restarts it: saves once edits pause
 
     def _on_delete_key(self) -> None:
         if self.media_bin.has_focus():
@@ -623,7 +664,7 @@ class MainWindow(QMainWindow):
     def _on_media_remove_requested(self, entry: MediaBinEntry) -> None:
         """Unused media goes silently. Media with clips on the timeline asks
         first -- those clips may be off-screen, so removing them wouldn't be
-        obvious -- then removes them as one undoable edit."""
+        obvious. Either way it's one undoable edit."""
         media_id = entry.media_ref.id
         clip_count = sum(
             1
@@ -635,9 +676,7 @@ class MainWindow(QMainWindow):
             entry.media_ref.path.name, clip_count
         ):
             return
-        self.media_bin.remove(media_id)
-        if clip_count:
-            self.undo_stack.push(RemoveMediaCommand(self.project, media_id))
+        self.undo_stack.push(RemoveMediaCommand(self.project, media_id))
 
     def _confirm_remove_used_media(self, name: str, clip_count: int) -> bool:
         plural = "clip" if clip_count == 1 else "clips"
@@ -724,6 +763,9 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self._autosave_timer.stop()
+        self._edit_autosave_timer.stop()
+        if self.undo_stack.isClean() and self._autosaved:
+            self._discard_autosave()  # undone back to saved, and not autosaved since
         self.media_bin.shutdown()
         self.timeline.shutdown()
         self.preview.shutdown()

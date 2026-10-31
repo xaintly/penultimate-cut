@@ -110,6 +110,24 @@ def qapp() -> QApplication:
     return _qapp_instance
 
 
+@pytest.fixture(autouse=True)
+def _no_autosave_left_behind():
+    """After each test: no window left open by it may autosave later (a few
+    seconds after its last edit), and nothing it autosaved stays -- either
+    would make a later test's MainWindow() offer recovery, in a blocking
+    dialog with no one to answer it."""
+    yield
+    from penultimate_cut.ui.main_window import MainWindow
+
+    for widget in QApplication.topLevelWidgets():
+        if isinstance(widget, MainWindow):
+            widget._autosave_timer.stop()
+            widget._edit_autosave_timer.stop()
+    for leftover in Path(_autosave_dir).iterdir():
+        if leftover.is_file():
+            leftover.unlink()
+
+
 @pytest.fixture(scope="session")
 def make_video_clip(media_dir: Path):
     """Factory fixture: `make_video_clip(name, duration=2, fps=30, size="320x240")` -> mp4 path.
