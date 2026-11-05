@@ -12,8 +12,10 @@ subprocess work, not CPU-bound Python, so threads (not processes) are the
 right tool -- so the UI never blocks per CLAUDE.md's "UI never blocks" rule.
 Worker threads never touch Qt widgets directly; a result comes back through
 a Qt signal, which is safe to emit cross-thread (Qt queues the connected
-slot onto the receiving object's thread automatically). An entry appears
-as soon as its file has been probed; its thumbnail fills in when made.
+slot onto the receiving object's thread automatically). A dropped or
+picked file shows up straight away as "Adding…" (probing a file on a
+sleeping network drive can take seconds, and nothing happening looks
+broken), becomes an entry once probed, and gets its thumbnail when made.
 
 Dragging *out* to the timeline goes through MEDIA_MIME_TYPE:
 `_MediaListWidget.mimeData()` below puts the dragged entry's id in that
@@ -85,8 +87,8 @@ class MediaBinEntry:
 
 
 class _ImportSignals(QObject):
-    imported = Signal(object, int)  # MediaRef, batch
-    failed = Signal(str, str)  # path, error message
+    imported = Signal(int, object, int)  # import number, MediaRef, batch
+    failed = Signal(int, str, str)  # import number, path, error message
     thumbnail_done = Signal(str, object, str)  # media id, Path | None, error ("" if none)
 
 
@@ -215,7 +217,7 @@ class MediaBin(QWidget):
 
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="media-import")
         self._signals = _ImportSignals()
-        self._signals.imported.connect(self.media_imported.emit)
+        self._signals.imported.connect(self._on_imported)
         self._signals.failed.connect(self._on_import_failed)
         self._signals.thumbnail_done.connect(self._on_thumbnail_done)
         self._media: list[MediaRef] = []
@@ -224,10 +226,13 @@ class MediaBin(QWidget):
         entry is gone, so undoing its removal doesn't make it again."""
         self._thumbnail_errors: dict[str, str] = {}
         self._pending: set[str] = set()
+        self._adding: dict[int, Path] = {}
+        """Files still being probed, by import number, shown after the media."""
         self._failed: list[tuple[str, str]] = []
-        """Imports that failed: (label, error), shown after the media. Not
-        part of the project; they go when removed or another project opens."""
+        """Imports that failed: (label, error), shown after those. Not part
+        of the project; they go when removed or another project opens."""
         self._batch = 0
+        self._imports = 0
 
         self._list = _MediaListWidget()
         self._list.files_dropped.connect(self.import_files)
@@ -242,6 +247,7 @@ class MediaBin(QWidget):
     def shutdown(self) -> None:
         """Stop accepting new import work. Call explicitly before this widget
         is destroyed, same reasoning as PreviewWidget.shutdown()."""
+        self._adding.clear()  # imports still under way are dropped when they finish
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     @property
@@ -263,7 +269,9 @@ class MediaBin(QWidget):
 
     def clear(self) -> None:
         """Forget everything -- e.g. when a different project is opened,
-        whose media bears no relation to whatever was in the bin before."""
+        whose media bears no relation to whatever was in the bin before.
+        Imports still under way are dropped when they finish."""
+        self._adding.clear()
         self._failed.clear()
         self._thumbnails.clear()
         self._thumbnail_errors.clear()
@@ -291,6 +299,8 @@ class MediaBin(QWidget):
             self._list.addItem(item)
             if media_ref.id == current_id:
                 self._list.setCurrentItem(item)
+        for path in self._adding.values():
+            self._list.addItem(QListWidgetItem(self._placeholder_icon(), f"{path.name}\nAdding…"))
         for label, error in self._failed:
             item = QListWidgetItem(label)
             item.setToolTip(error)
@@ -302,17 +312,18 @@ class MediaBin(QWidget):
         entry = self.get(media_id) if media_id else None
         if entry is None:
             # A failed import ("Couldn't import ...") -- nothing to ask about.
-            row = self._list.row(item) - len(self._media)
+            # One still being added stays: it's not anything yet.
+            row = self._list.row(item) - len(self._media) - len(self._adding)
             if 0 <= row < len(self._failed):
                 del self._failed[row]
-            self._list.takeItem(self._list.row(item))
+                self._list.takeItem(self._list.row(item))
             return
         self.remove_requested.emit(entry)
 
     def _on_row_move_requested(self, from_row: int, before_row: int) -> None:
         count = len(self._media)
         if from_row >= count:
-            return  # a failed import; those stay at the end
+            return  # still being added, or a failed import; those stay at the end
         before = min(before_row, count)
         if before not in (from_row, from_row + 1):
             self.move_requested.emit(from_row, before)
@@ -340,16 +351,19 @@ class MediaBin(QWidget):
             return
         self._batch += 1
         for path in paths:
-            self._executor.submit(self._import_one, path, self._batch)
+            self._imports += 1
+            self._adding[self._imports] = path
+            self._executor.submit(self._import_one, self._imports, path, self._batch)
+        self._rebuild()
 
-    def _import_one(self, path: Path, batch: int) -> None:
+    def _import_one(self, number: int, path: Path, batch: int) -> None:
         """Runs on a worker thread -- no Qt widget access here."""
         try:
             info = probe(path)
         except ProbeError as exc:
-            self._signals.failed.emit(str(path), str(exc))
+            self._signals.failed.emit(number, str(path), str(exc))
             return
-        self._signals.imported.emit(_media_ref_from_info(path, info), batch)
+        self._signals.imported.emit(number, _media_ref_from_info(path, info), batch)
 
     def _request_thumbnail(self, media_ref: MediaRef) -> None:
         if media_ref.id in self._thumbnails or media_ref.id in self._pending:
@@ -384,12 +398,17 @@ class MediaBin(QWidget):
                 item.setIcon(self._icon_for(self._media[row]))
                 item.setToolTip(self._thumbnail_errors.get(media_id, ""))
 
-    def _on_import_failed(self, path: str, message: str) -> None:
-        label = f"Couldn't import {Path(path).name}"
-        self._failed.append((label, message))
-        item = QListWidgetItem(label)
-        item.setToolTip(message)
-        self._list.addItem(item)
+    def _on_imported(self, number: int, media_ref: MediaRef, batch: int) -> None:
+        if self._adding.pop(number, None) is None:
+            return  # cleared away while it was being probed
+        self._rebuild()  # the owner usually rebuilds again, with the entry in place
+        self.media_imported.emit(media_ref, batch)
+
+    def _on_import_failed(self, number: int, path: str, message: str) -> None:
+        if self._adding.pop(number, None) is None:
+            return
+        self._failed.append((f"Couldn't import {Path(path).name}", message))
+        self._rebuild()
 
     def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
         media_id = item.data(Qt.ItemDataRole.UserRole)
@@ -405,9 +424,19 @@ class MediaBin(QWidget):
             return thumbnail_icon(made)
         if media_ref.id in self._thumbnail_errors:
             return self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning)
-        blank = QPixmap(*_ICON_SIZE)  # still being made; keeps the grid's shape
-        blank.fill(Qt.GlobalColor.transparent)
-        return QIcon(blank)
+        return self._placeholder_icon()  # still being made
+
+    def _placeholder_icon(self) -> QIcon:
+        """A plain grey box where the thumbnail will be: something visible
+        right away, at the grid's shape."""
+        canvas = QPixmap(*_ICON_SIZE)
+        canvas.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(canvas)
+        color = self.palette().mid().color()
+        color.setAlpha(90)
+        painter.fillRect(canvas.rect().adjusted(8, 4, -8, -4), color)
+        painter.end()
+        return QIcon(canvas)
 
     # --- drag and drop, files coming in from outside the app ------------------
 

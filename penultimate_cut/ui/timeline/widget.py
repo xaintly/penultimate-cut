@@ -17,8 +17,10 @@ only the tiles on screen are ever requested, so a 2-hour clip costs no more
 than a 2-minute one. Each tile shows the frame at the nearest point of a
 time grid in the source file whose spacing is a power of two seconds, at
 most one tile's worth: a finer zoom level's grid contains every point of a
-coarser one, so zooming mostly reuses frames already made. Frames queued
-for a tile that has since scrolled away are skipped, not extracted.
+coarser one, so zooming mostly reuses frames already made. Tiles up to a
+screen's width either side are made too, after the ones on screen, so
+scrolling a little finds them ready. Frames queued for a tile that has
+since scrolled out of that range are skipped, not extracted.
 
 The waveform is computed once per media file, on its own worker so a long
 file never holds up filmstrip frames, and painted only for visible pixels.
@@ -33,7 +35,10 @@ never produces an undo step.
 from __future__ import annotations
 
 import math
+import os
+import threading
 from collections import OrderedDict
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from fractions import Fraction
@@ -107,6 +112,8 @@ MIN_HEIGHT = TRACK_TOP + TRACK_HEIGHT + 4
 
 DEFAULT_PIXELS_PER_SECOND = Fraction(50)
 MIN_PIXELS_PER_SECOND = Fraction(2)
+"""How far out the timeline zooms -- or further, for a project too long to
+fit on screen at this zoom, until the whole project fits."""
 MAX_PIXELS_PER_SECOND = Fraction(500)
 ZOOM_FACTOR = Fraction(3, 2)
 
@@ -121,6 +128,9 @@ FRAME_IMAGE_HEIGHT = FILMSTRIP_HEIGHT * 2
 """Frames are extracted at twice the tile height, to stay sharp on
 high-DPI screens."""
 MIN_GRID_SECONDS = Fraction(1, 16)
+FRAME_WORKERS = max(2, min(8, (os.cpu_count() or 2) - 1))
+"""Filmstrip frames made at once: each is its own single-threaded ffmpeg,
+so about one per core, leaving one for everything else."""
 FRAME_CACHE_BYTES = 64 * 1024 * 1024
 EMPTY_TIMELINE_HINT = "Drag videos here, or click Import"
 """Decoded filmstrip frames kept in memory (least recently drawn dropped
@@ -270,7 +280,9 @@ class _TimelineCanvas(QWidget):
         self._edge_scroll_timer.setInterval(EDGE_SCROLL_INTERVAL_MS)
         self._edge_scroll_timer.timeout.connect(self._on_edge_scroll)
 
-        self._frame_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="filmstrip")
+        self._frame_executor = ThreadPoolExecutor(
+            max_workers=FRAME_WORKERS, thread_name_prefix="filmstrip"
+        )
         self._waveform_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="waveform")
         self._closing = False
         self._frames: OrderedDict[FrameKey, QPixmap] = OrderedDict()
@@ -280,9 +292,15 @@ class _TimelineCanvas(QWidget):
         self._frame_requests: dict[FrameKey, MediaRef] = {}
         """Collected while painting, submitted once the paint has finished
         building `_wanted_frames`."""
+        self._frame_lock = threading.Lock()
+        self._queued_frames: dict[FrameKey, MediaRef] = {}
+        """Submitted but not yet started, oldest first; guarded by
+        `_frame_lock`. Each worker job takes the most useful one."""
         self._wanted_frames: frozenset[FrameKey] = frozenset()
-        """The tiles on screen at the last paint. Read by worker threads,
-        only ever replaced whole."""
+        """The tiles on screen or near it at the last paint. Read by worker
+        threads, only ever replaced whole."""
+        self._visible_frames: frozenset[FrameKey] = frozenset()
+        """Just the ones on screen, made first. Same rules."""
         self._waveforms: dict[Path, Waveform | None] = {}
         self._pending_waveforms: set[Path] = set()
         self._title_tiles: dict[tuple[Title, int, int], QPixmap] = {}
@@ -397,7 +415,7 @@ class _TimelineCanvas(QWidget):
         """Zoom keeping the time at pixel `anchor_x` where it is on screen:
         the mouse pointer for the wheel; for the keys, the playhead if it's
         in view, otherwise the middle."""
-        clamped = max(MIN_PIXELS_PER_SECOND, min(MAX_PIXELS_PER_SECOND, pixels_per_second))
+        clamped = max(self._min_pixels_per_second(), min(MAX_PIXELS_PER_SECOND, pixels_per_second))
         if anchor_x is None:
             playhead_x = self._view.x_for_time(self._playhead)
             anchor_x = playhead_x if 0 <= playhead_x <= self.width() else self.width() / 2
@@ -411,6 +429,12 @@ class _TimelineCanvas(QWidget):
         self.content_changed.emit()  # scrollbar range first, then its position
         self.scroll_requested.emit(round(self._view.scroll_offset * clamped))
         self.update()
+
+    def _min_pixels_per_second(self) -> Fraction:
+        track = self.track
+        if track is None or track.duration <= 0 or self.width() <= 0:
+            return MIN_PIXELS_PER_SECOND
+        return min(MIN_PIXELS_PER_SECOND, Fraction(self.width()) / track.duration)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         """The wheel zooms around the pointer; Shift+wheel and sideways
@@ -450,8 +474,9 @@ class _TimelineCanvas(QWidget):
         self._paint_ruler(painter)
         track = self.track
         wanted: set[FrameKey] = set()
+        visible: set[FrameKey] = set()
         if track is not None:
-            self._paint_track(painter, track, wanted)
+            self._paint_track(painter, track, wanted, visible)
         if track is None or not track.items:
             painter.setPen(_HINT_COLOR)
             painter.drawText(
@@ -461,6 +486,7 @@ class _TimelineCanvas(QWidget):
             )
         self._paint_playhead(painter)
         painter.end()
+        self._visible_frames = frozenset(visible)
         self._wanted_frames = frozenset(wanted)
         self._submit_frame_requests()
 
@@ -480,18 +506,29 @@ class _TimelineCanvas(QWidget):
                 painter.drawText(int(x) + 3, RULER_HEIGHT - 6, _format_tick(time))
             time += interval
 
-    def _paint_track(self, painter: QPainter, track: Track, wanted: set[FrameKey]) -> None:
+    def _paint_track(
+        self, painter: QPainter, track: Track, wanted: set[FrameKey], visible: set[FrameKey]
+    ) -> None:
         preview = self._preview_track(track)
+        margin = self.width()  # filmstrip tiles are made this far off screen too
         for index, item in enumerate(preview.items):
             start_x, end_x = item_x_range(preview, self._view, index)
-            if end_x < 0 or start_x > self.width():
+            if end_x < -margin or start_x > self.width() + margin:
                 continue
             rect = QRect(int(start_x), TRACK_TOP, max(1, int(end_x - start_x)), TRACK_HEIGHT)
-            if isinstance(item, Gap):
+            if end_x < 0 or start_x > self.width():
+                if isinstance(item, Clip):
+                    self._want_filmstrip(rect, item, wanted, visible)
+            elif isinstance(item, Gap):
                 self._paint_gap(painter, rect)
             else:
                 self._paint_clip(
-                    painter, rect, item, selected=index == self._selected_index, wanted=wanted
+                    painter,
+                    rect,
+                    item,
+                    selected=index == self._selected_index,
+                    wanted=wanted,
+                    visible=visible,
                 )
 
     def _preview_track(self, track: Track) -> Track:
@@ -519,10 +556,17 @@ class _TimelineCanvas(QWidget):
         painter.drawRect(rect.adjusted(0, 0, -1, -1))
 
     def _paint_clip(
-        self, painter: QPainter, rect: QRect, clip: Clip, *, selected: bool, wanted: set[FrameKey]
+        self,
+        painter: QPainter,
+        rect: QRect,
+        clip: Clip,
+        *,
+        selected: bool,
+        wanted: set[FrameKey],
+        visible: set[FrameKey],
     ) -> None:
         painter.fillRect(rect, _CLIP_BG)
-        self._paint_filmstrip(painter, rect, clip, wanted)
+        self._paint_filmstrip(painter, rect, clip, wanted, visible)
         self._paint_waveform(painter, rect, clip)
         self._paint_fades(painter, rect, clip)
         painter.setPen(_SELECTED_BORDER if selected else _CLIP_BORDER)
@@ -555,8 +599,59 @@ class _TimelineCanvas(QWidget):
             painter.drawPolygon(QPolygonF(wedge))
         painter.restore()
 
+    def _filmstrip_tiles(self, rect: QRect, clip: Clip) -> Iterator[tuple[float, FrameKey, bool]]:
+        """(x, frame, on screen) for each of `clip`'s filmstrip tiles (the
+        clip drawn at `rect`) on screen or within a screen's width of it."""
+        media = clip.media_ref
+        if not media.has_video or media.title is not None:
+            return
+        tile_width = _tile_width(_aspect(clip))
+        tile_seconds = fraction_from_seconds(tile_width) / self._view.pixels_per_second
+        grid = _grid_seconds(tile_seconds * clip.speed)
+        tile_count = math.ceil(rect.width() / tile_width)
+        margin = self.width()
+        first = max(0, int((-margin - rect.x()) // tile_width))
+        last = min(tile_count, int((self.width() + margin - rect.x()) // tile_width) + 1)
+        for tile in range(first, last):
+            time = None
+            if not media.is_still_image:
+                time = _tile_source_time(clip, (tile + Fraction(1, 2)) * tile_seconds, grid)
+            x = rect.x() + tile * tile_width
+            yield x, (media.path, time), x + tile_width > 0 and x < self.width()
+
+    def _want_frame(
+        self,
+        key: FrameKey,
+        media: MediaRef,
+        on_screen: bool,
+        wanted: set[FrameKey],
+        visible: set[FrameKey],
+    ) -> QPixmap | None:
+        """The frame if it's made (null if it failed); otherwise asks for it."""
+        wanted.add(key)
+        if on_screen:
+            visible.add(key)
+        pixmap = self._frames.get(key)
+        if pixmap is None:
+            self._frame_requests[key] = media
+        else:
+            self._frames.move_to_end(key)
+        return pixmap
+
+    def _want_filmstrip(
+        self, rect: QRect, clip: Clip, wanted: set[FrameKey], visible: set[FrameKey]
+    ) -> None:
+        """Ask for the frames of a clip just off screen, without drawing it."""
+        for _x, key, on_screen in self._filmstrip_tiles(rect, clip):
+            self._want_frame(key, clip.media_ref, on_screen, wanted, visible)
+
     def _paint_filmstrip(
-        self, painter: QPainter, rect: QRect, clip: Clip, wanted: set[FrameKey]
+        self,
+        painter: QPainter,
+        rect: QRect,
+        clip: Clip,
+        wanted: set[FrameKey],
+        visible: set[FrameKey],
     ) -> None:
         media = clip.media_ref
         if not media.has_video:
@@ -565,28 +660,12 @@ class _TimelineCanvas(QWidget):
             self._paint_title_tiles(painter, rect, media.title)
             return
         tile_width = _tile_width(_aspect(clip))
-        tile_seconds = fraction_from_seconds(tile_width) / self._view.pixels_per_second
-        grid = _grid_seconds(tile_seconds * clip.speed)
-        tile_count = math.ceil(rect.width() / tile_width)
-        first = max(0, int(-rect.x() // tile_width))
-        last = min(tile_count, int((self.width() - rect.x()) // tile_width) + 1)
-
         painter.save()
         painter.setClipRect(rect)  # the last tile is cut off, not squeezed
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        for tile in range(first, last):
-            time = None
-            if not media.is_still_image:
-                time = _tile_source_time(clip, (tile + Fraction(1, 2)) * tile_seconds, grid)
-            key: FrameKey = (media.path, time)
-            wanted.add(key)
-            pixmap = self._frames.get(key)
-            if pixmap is None:
-                self._frame_requests[key] = media
-                continue
-            self._frames.move_to_end(key)
-            if not pixmap.isNull():
-                x = rect.x() + tile * tile_width
+        for x, key, on_screen in self._filmstrip_tiles(rect, clip):
+            pixmap = self._want_frame(key, media, on_screen, wanted, visible)
+            if on_screen and pixmap is not None and not pixmap.isNull():
                 target = QRectF(x, rect.y(), tile_width, FILMSTRIP_HEIGHT)
                 painter.drawPixmap(target, pixmap, QRectF(pixmap.rect()))
         painter.restore()
@@ -666,7 +745,22 @@ class _TimelineCanvas(QWidget):
         for key, media in requests.items():
             if key not in self._pending_frames:
                 self._pending_frames.add(key)
-                self._frame_executor.submit(self._load_frame, key, media)
+                with self._frame_lock:
+                    self._queued_frames[key] = media
+                self._frame_executor.submit(self._load_next_frame)
+
+    def _load_next_frame(self) -> None:
+        # Runs on a worker thread. One job per queued frame, but not
+        # necessarily that one: whatever's on screen goes first, then what's
+        # near it, then (skipped) whatever has scrolled away.
+        with self._frame_lock:
+            visible, wanted = self._visible_frames, self._wanted_frames
+            queued = self._queued_frames
+            key = next((k for k in queued if k in visible), None)
+            if key is None:
+                key = next((k for k in queued if k in wanted), next(iter(queued)))
+            media = queued.pop(key)
+        self._load_frame(key, media)
 
     def _load_frame(self, key: FrameKey, media: MediaRef) -> None:
         # Runs on a worker thread.
@@ -1055,8 +1149,10 @@ def _ruler_tick_interval(pixels_per_second: Fraction) -> Fraction:
 
 
 def _format_tick(time: Fraction) -> str:
-    total_seconds = int(time)
-    minutes, seconds = divmod(total_seconds, 60)
+    hours, rest = divmod(int(time), 3600)
+    minutes, seconds = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes}:{seconds:02d}"
 
 

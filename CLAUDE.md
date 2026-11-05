@@ -287,11 +287,16 @@ This plays in every browser, LMS, and media player that matters.
   (AVI, WMV, MPG, MOV) must work. Audio-only files import, but using them on the
   timeline waits for Phase 2's audio track (the single Phase 1 track is video; for
   now an audio-only clip can be dropped there, and export refuses it).
-- Media bin with thumbnails and durations.
+- Media bin with thumbnails and durations. A dropped or picked file shows up at once
+  as "Adding…" and fills in as it's probed and its thumbnail is made: if nothing
+  happens within a second, people think the app is broken.
 - Timeline: one video track + its linked audio; scroll and zoom; filmstrip thumbnails;
   audio waveform. Both scale to multi-hour files: filmstrip tiles keep the video's
-  shape (never stretched) and only on-screen tiles are made; the waveform is computed
-  once per media file by ffmpeg (`astats`) and shared by every clip cut from it.
+  shape (never stretched) and only tiles on screen (first) and a screen's width either
+  side are made; the waveform is computed once per media file by ffmpeg (`astats`) and
+  shared by every clip cut from it. Thumbnails are approximations, made fast: the next
+  keyframe rather than the exact frame (`media/thumbnails.py`). Zooming out stops at
+  2 px/s, or once the whole project fits if it's longer than that.
 - Preview sliders (position, volume): a click anywhere on the line jumps there.
 - Playhead: click/drag to scrub, play/pause, speed up/slow down playback, frame step.
 - **Split at playhead.**

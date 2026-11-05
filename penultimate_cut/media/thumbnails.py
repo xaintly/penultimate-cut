@@ -6,6 +6,12 @@ tiles on screen, at times on a fixed grid in the source file (see
 ui/timeline/widget.py), so the same cached frame serves every clip cut from
 that file and every zoom level that lands on it.
 
+Both are approximations, so they're made the quick way: the first keyframe
+from the requested time on, decoded alone, instead of decoding every frame
+from the keyframe before it up to the exact time. That's most of the cost
+for phone video (4K, HEVC, keyframes a second or two apart). Past the last
+keyframe there's no such frame, and the exact way is used instead.
+
 Still images are a special case: every point in their "clip" looks the same,
 and ffmpeg can't seek (`-ss`) into a single-frame source at all — so one
 frame is extracted and reused for every requested time.
@@ -78,7 +84,33 @@ def _extract_frame(
     except ExecutableNotFoundError as exc:
         raise ThumbnailError(str(exc)) from exc
 
+    if timestamp is not None:
+        try:
+            _run_ffmpeg(ffmpeg, media_path, timestamp, scale, out_path, keyframe=True)
+        except ThumbnailError:
+            pass
+        if out_path.exists():
+            return
+    _run_ffmpeg(ffmpeg, media_path, timestamp, scale, out_path, keyframe=False)
+    if not out_path.exists():
+        # e.g. a time past the last frame: ffmpeg exits cleanly with no output.
+        raise ThumbnailError(f"{media_path}: no frame at {timestamp}")
+
+
+def _run_ffmpeg(
+    ffmpeg: str,
+    media_path: Path,
+    timestamp: Fraction | None,
+    scale: str,
+    out_path: Path,
+    *,
+    keyframe: bool,
+) -> None:
     args = [ffmpeg, "-hide_banner", "-loglevel", "error"]
+    if keyframe:
+        # Decode keyframes only, on one thread: for a single frame, more threads
+        # only cost time to start, and several of these run at once anyway.
+        args += ["-skip_frame", "nokey", "-threads", "1"]
     if timestamp is not None:
         args += ["-ss", str(float(timestamp))]
     args += [
@@ -97,6 +129,3 @@ def _extract_frame(
         subprocess.run(args, check=True, capture_output=True, text=True, creationflags=NO_WINDOW)
     except subprocess.CalledProcessError as exc:
         raise ThumbnailError(f"{media_path}: ffmpeg failed: {exc.stderr.strip()}") from exc
-    if not out_path.exists():
-        # e.g. a time past the last frame: ffmpeg exits cleanly with no output.
-        raise ThumbnailError(f"{media_path}: no frame at {timestamp}")

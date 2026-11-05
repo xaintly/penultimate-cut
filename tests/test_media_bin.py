@@ -126,12 +126,52 @@ def test_import_nonexistent_file_adds_failed_placeholder(qapp, tmp_path: Path) -
     try:
         missing = tmp_path / "does_not_exist.mp4"
         media_bin.import_files([missing])
-        assert pump_until(qapp, lambda: media_bin._list.count() == 1)
+        assert media_bin._list.count() == 1  # "Adding…" straight away
+        assert pump_until(qapp, lambda: "Couldn't import" in media_bin._list.item(0).text())
 
         assert media_bin.entries == []
+        assert media_bin._list.count() == 1
         item = media_bin._list.item(0)
-        assert "Couldn't import" in item.text()
         assert item.toolTip() != ""
+    finally:
+        media_bin.shutdown()
+
+
+def test_an_import_shows_up_straight_away_and_fills_in(qapp, make_video_clip) -> None:
+    """Probing can take seconds (a sleeping network drive): the file is
+    listed as being added the moment it's dropped, then becomes the entry."""
+    source = make_video_clip("mb_adding.mp4", duration=1.0, fps=30, size="320x240")
+    media_bin = owned_bin()
+    try:
+        media_bin.import_files([source])
+        assert media_bin._list.count() == 1
+        assert media_bin._list.item(0).text() == "mb_adding.mp4\nAdding…"
+        assert media_bin.entries == []
+
+        # Removing it meanwhile does nothing; it isn't anything yet.
+        media_bin._request_remove(media_bin._list.item(0))
+        assert media_bin._list.count() == 1
+
+        assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
+        assert media_bin._list.count() == 1
+        assert "Adding" not in media_bin._list.item(0).text()
+    finally:
+        media_bin.shutdown()
+
+
+def test_imports_still_under_way_are_dropped_by_clear(qapp, make_video_clip) -> None:
+    source = make_video_clip("mb_adding_cleared.mp4", duration=1.0, fps=30, size="320x240")
+    media_bin = MediaBin()
+    received: list[MediaRef] = []
+    media_bin.media_imported.connect(lambda media_ref, _batch: received.append(media_ref))
+    try:
+        media_bin.import_files([source])
+        media_bin.clear()
+        assert media_bin._list.count() == 0
+        media_bin.import_files([source])
+        assert pump_until(qapp, lambda: len(received) == 1)
+        pump_until(qapp, lambda: False, timeout=0.5)  # time for the first to finish too
+        assert len(received) == 1  # only the second import
     finally:
         media_bin.shutdown()
 
@@ -165,7 +205,7 @@ def test_double_click_emits_media_double_clicked(qapp, make_video_clip) -> None:
     media_bin.media_double_clicked.connect(received.append)
     try:
         media_bin.import_files([source])
-        assert pump_until(qapp, lambda: media_bin._list.count() == 1)
+        assert pump_until(qapp, lambda: len(media_bin.entries) == 1)
 
         item = media_bin._list.item(0)
         media_bin._list.itemDoubleClicked.emit(item)
@@ -390,9 +430,9 @@ def test_dragging_an_entry_within_the_bin_moves_it_between_others(qapp, make_sti
     try:
         media_bin.resize(800, 300)
         media_bin.show()
-        for name in ("mb_order_a.png", "mb_order_b.png", "mb_order_c.png"):
+        for count, name in enumerate(("mb_order_a.png", "mb_order_b.png", "mb_order_c.png"), 1):
             media_bin.import_files([make_still_image(name)])
-            assert pump_until(qapp, lambda n=name: n in _bin_names(media_bin))
+            assert pump_until(qapp, lambda n=count: len(media_bin.entries) == n)
         assert _bin_names(media_bin) == ["mb_order_a.png", "mb_order_b.png", "mb_order_c.png"]
         listing = media_bin._list
 

@@ -23,6 +23,7 @@ from penultimate_cut.ui.timeline.widget import (
     EDGE_SCROLL_MAX_STEP_PX,
     TRACK_TOP,
     TimelineWidget,
+    _format_tick,
     _grid_seconds,
     _tile_source_time,
     _tile_width,
@@ -516,6 +517,32 @@ def test_zoom_in_and_out_change_pixels_per_second(qapp, make_video_clip) -> None
         widget.shutdown()
 
 
+def test_a_long_project_zooms_out_until_it_all_fits(qapp, tmp_path) -> None:
+    """2 px/s is the limit for a short project; a 2-hour one zooms out
+    further, until the whole of it is on screen."""
+    widget = TimelineWidget()
+    try:
+        widget.resize(800, 150)
+        widget.set_project(make_project(tmp_path / "long.mp4", duration=7200.0), QUndoStack())
+        width = widget._canvas.width()
+        for _ in range(40):
+            widget.zoom_out()
+        assert widget._canvas._view.pixels_per_second == Fraction(width, 7200)
+        assert widget._scrollbar.maximum() == 0
+
+        widget.set_project(make_project(tmp_path / "short.mp4", duration=10.0), QUndoStack())
+        for _ in range(40):
+            widget.zoom_out()
+        assert widget._canvas._view.pixels_per_second == 2
+    finally:
+        widget.shutdown()
+
+
+def test_ruler_counts_hours_past_the_first() -> None:
+    assert _format_tick(Fraction(59 * 60 + 30)) == "59:30"
+    assert _format_tick(Fraction(2 * 3600 + 5 * 60)) == "2:05:00"
+
+
 def test_scrollbar_range_tracks_zoom_and_content_width(qapp, make_video_clip) -> None:
     source = make_video_clip("tlw_scroll.mp4", duration=10.0, fps=30, size="320x240")
     project = make_project(source, duration=10.0)
@@ -578,9 +605,10 @@ def test_async_filmstrip_and_waveform_generation(qapp, make_video_clip) -> None:
         widget.shutdown()
 
 
-def test_long_clip_requests_only_the_tiles_on_screen(qapp, make_video_clip) -> None:
+def test_long_clip_requests_only_the_tiles_on_or_near_the_screen(qapp, make_video_clip) -> None:
     source = make_video_clip("tlw_long.mp4", duration=2.0, fps=30, size="320x240")
-    # Pretend it's a 2-hour file: only the tiles in view may be requested.
+    # Pretend it's a 2-hour file: only the tiles in view, and a screen's
+    # width either side of it, may be requested.
     media = make_media(source, duration=7200.0)
     clip = Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(7200))
     project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip])])
@@ -593,9 +621,36 @@ def test_long_clip_requests_only_the_tiles_on_screen(qapp, make_video_clip) -> N
         widget.show()
         qapp.processEvents()
         canvas = widget._canvas
-        on_screen = len(canvas._wanted_frames)
-        assert 0 < on_screen <= canvas.width() // 64 + 1
-        assert len(canvas._pending_frames) + len(canvas._frames) <= on_screen
+        per_screen = canvas.width() // 64 + 1
+        assert 0 < len(canvas._visible_frames) <= per_screen
+        # At the start, there's nothing to the left to make.
+        assert len(canvas._visible_frames) < len(canvas._wanted_frames) <= 2 * per_screen
+        assert canvas._visible_frames <= canvas._wanted_frames
+        assert len(canvas._pending_frames) + len(canvas._frames) <= len(canvas._wanted_frames)
+    finally:
+        widget.shutdown()
+
+
+def test_frames_on_screen_are_made_before_those_near_it(qapp, tmp_path, monkeypatch) -> None:
+    widget = TimelineWidget()
+    try:
+        canvas = widget._canvas
+        media = make_media(tmp_path / "x.mp4")
+        near, on_screen, gone = (
+            (media.path, Fraction(1)),
+            (media.path, Fraction(2)),
+            (media.path, Fraction(3)),
+        )
+        canvas._queued_frames = {gone: media, near: media, on_screen: media}
+        canvas._wanted_frames = frozenset({near, on_screen})
+        canvas._visible_frames = frozenset({on_screen})
+        made: list[object] = []
+        monkeypatch.setattr(canvas, "_load_frame", lambda key, _media: made.append(key))
+
+        for _ in range(3):
+            canvas._load_next_frame()
+
+        assert made == [on_screen, near, gone]  # gone is then skipped by _load_frame
     finally:
         widget.shutdown()
 
