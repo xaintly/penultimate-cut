@@ -25,11 +25,14 @@ since scrolled out of that range are skipped, not extracted.
 The waveform is computed once per media file, on its own worker so a long
 file never holds up filmstrip frames, and painted only for visible pixels.
 
-Live edits during a drag (trimming, reordering) are previewed by computing
-a scratch `Track` with the real `timeline_ops` function and painting that
-instead of `project.tracks[track_index]` -- never touching the project or
-the undo stack until the mouse is released, so a drag that goes nowhere
-never produces an undo step.
+A trim is previewed live by computing a scratch `Track` with the real
+`timeline_ops` function and painting that instead of
+`project.tracks[track_index]`. Moving a clip, or dragging media in from the
+bin, leaves the track still: a see-through ghost of the clip follows the
+pointer and a marker shows where it would land (`geometry.drop_target`;
+into empty space, the ghost sits exactly there). Neither touches the
+project or the undo stack until the mouse is released, so a drag that goes
+nowhere never produces an undo step.
 """
 
 from __future__ import annotations
@@ -59,8 +62,11 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor,
     QDragEnterEvent,
+    QDragLeaveEvent,
+    QDragMoveEvent,
     QDropEvent,
     QHelpEvent,
+    QKeyEvent,
     QMouseEvent,
     QPainter,
     QPaintEvent,
@@ -76,6 +82,7 @@ from penultimate_cut.commands.timeline_commands import (
     DeleteCommand,
     InsertCommand,
     MoveCommand,
+    PlaceCommand,
     RemoveGapsCommand,
     SplitCommand,
     TrimCommand,
@@ -97,12 +104,19 @@ from penultimate_cut.model.project import (
     Track,
     TrackItem,
     auto_resolution,
+    default_clip_for,
 )
 from penultimate_cut.model.time import fraction_from_seconds, snap_to_frame
-from penultimate_cut.model.timeline_ops import TimelineOpError, move_item, trim_item
+from penultimate_cut.model.timeline_ops import TimelineOpError, lift_item, move_item, trim_item
 from penultimate_cut.ui.format import format_duration
 from penultimate_cut.ui.media_bin import MEDIA_MIME_TYPE
-from penultimate_cut.ui.timeline.geometry import TimelineView, hit_test, item_x_range
+from penultimate_cut.ui.timeline.geometry import (
+    DropTarget,
+    TimelineView,
+    drop_target,
+    hit_test,
+    item_x_range,
+)
 from penultimate_cut.ui.titles import paint_title
 
 RULER_HEIGHT = 20
@@ -164,6 +178,10 @@ _FADE_SHADE = QColor(0, 0, 0, 160)
 _HINT_COLOR = QColor(150, 150, 150)
 _PLAYHEAD_COLOR = QColor(230, 40, 40)
 _LABEL_COLOR = QColor(235, 235, 235)
+_LIFTED_SHADE = QColor(26, 26, 26, 170)
+"""Over a clip's own spot while it's being moved."""
+_DROP_MARKER = QColor(255, 255, 255)
+GHOST_OPACITY = 0.6
 
 
 FrameKey = tuple[Path, Fraction | None]
@@ -223,8 +241,26 @@ class _ReorderDrag:
     kind: Literal["reorder"]
     start_index: int
     press_x: float
+    grab_px: float
+    """How far into the clip it was grabbed: its ghost keeps that spot
+    under the pointer."""
     armed: bool = False
-    target_index: int | None = None
+    cancelled: bool = False
+    """Esc was pressed: the rest of this press does nothing."""
+    lifted: Track | None = None
+    """The track with the clip lifted out (`timeline_ops.lift_item`), what
+    a drop lands in; set once the drag is armed."""
+    target: DropTarget | None = None
+
+
+@dataclass
+class _BinDrop:
+    """Media from the media bin being dragged over the timeline."""
+
+    media_id: str
+    clip: Clip
+    """The clip a drop would add, for its ghost."""
+    target: DropTarget | None = None
 
 
 DragState = _TrimDrag | _ReorderDrag
@@ -251,7 +287,7 @@ class _TimelineCanvas(QWidget):
     playhead_moved = Signal(object)  # Fraction
     selection_changed = Signal(object)  # int | None
     content_changed = Signal()  # project/zoom/scroll changed -> scrollbar range may need updating
-    media_dropped = Signal(str, int)  # media_id, insert index
+    media_dropped = Signal(str, int, object)  # media_id, index, offset (see place_item)
     scroll_requested = Signal(int)  # pixels from the timeline's start
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -273,6 +309,7 @@ class _TimelineCanvas(QWidget):
         self._playhead = Fraction(0)
         self._selected_index: int | None = None
         self._drag: DragState | None = None
+        self._bin_drop: _BinDrop | None = None
         self._last_mouse_x = 0.0
         self._wheel_zoom = 0
         """Wheel movement not yet turned into a zoom step (120 = one notch)."""
@@ -389,6 +426,18 @@ class _TimelineCanvas(QWidget):
         self._undo_stack.push(InsertCommand(self._project, self._track_index, target, item, text))
         self.update()
 
+    def place_clip(self, item: TrackItem, index: int, offset: Fraction) -> None:
+        """Add `item` where something dropped on the timeline goes (see
+        `timeline_ops.place_item`)."""
+        if self._project is None or self._undo_stack is None:
+            return
+        try:
+            self._undo_stack.push(
+                PlaceCommand(self._project, self._track_index, index, offset, item)
+            )
+        except TimelineOpError:
+            pass
+
     def select(self, index: int | None) -> None:
         self._select(index)
 
@@ -484,6 +533,7 @@ class _TimelineCanvas(QWidget):
                 Qt.AlignmentFlag.AlignCenter,
                 EMPTY_TIMELINE_HINT,
             )
+        self._paint_drop(painter, wanted, visible)
         self._paint_playhead(painter)
         painter.end()
         self._visible_frames = frozenset(visible)
@@ -539,16 +589,38 @@ class _TimelineCanvas(QWidget):
                 )
             except TimelineOpError:
                 return track
-        if (
-            isinstance(self._drag, _ReorderDrag)
-            and self._drag.armed
-            and self._drag.target_index is not None
-        ):
-            try:
-                return move_item(track, self._drag.start_index, self._drag.target_index)
-            except TimelineOpError:
-                return track
         return track
+
+    def _paint_drop(self, painter: QPainter, wanted: set[FrameKey], visible: set[FrameKey]) -> None:
+        """While a clip is being moved (or media dragged in from the bin): its
+        own spot shaded, a see-through ghost of it, and a marker where it
+        would go."""
+        drag, drop, track = self._drag, self._bin_drop, self.track
+        if track is None:
+            return
+        if isinstance(drag, _ReorderDrag) and drag.armed and drag.target is not None:
+            clip = track.items[drag.start_index]
+            start_x, end_x = item_x_range(track, self._view, drag.start_index)
+            painter.fillRect(
+                QRectF(start_x, TRACK_TOP, end_x - start_x, TRACK_HEIGHT), _LIFTED_SHADE
+            )
+            target, ghost_x = drag.target, self._last_mouse_x - drag.grab_px
+        elif drop is not None and drop.target is not None:
+            clip, target, ghost_x = drop.clip, drop.target, self._last_mouse_x
+        else:
+            return
+        if not isinstance(clip, Clip):
+            return
+        if target.into_space:
+            ghost_x = self._view.x_for_time(target.time)
+        width = self._view.width_for_duration(clip.duration)
+        rect = QRect(int(ghost_x), TRACK_TOP, max(1, int(width)), TRACK_HEIGHT)
+        painter.save()
+        painter.setOpacity(GHOST_OPACITY)
+        self._paint_clip(painter, rect, clip, selected=True, wanted=wanted, visible=visible)
+        painter.restore()
+        marker_x = self._view.x_for_time(target.time)
+        painter.fillRect(QRectF(marker_x - 1.5, TRACK_TOP - 4, 3, TRACK_HEIGHT + 8), _DROP_MARKER)
 
     def _paint_gap(self, painter: QPainter, rect: QRect) -> None:
         painter.fillRect(rect, _GAP_BG)
@@ -856,7 +928,11 @@ class _TimelineCanvas(QWidget):
 
         self._select(hit.index)
         self._scrub_to_x(x)
-        self._drag = _ReorderDrag(kind="reorder", start_index=hit.index, press_x=x)
+        if isinstance(item, Clip):  # empty space isn't moved, just deleted
+            start_x, _ = item_x_range(track, self._view, hit.index)
+            self._drag = _ReorderDrag(
+                kind="reorder", start_index=hit.index, press_x=x, grab_px=x - start_x
+            )
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         x = event.position().x()
@@ -876,9 +952,14 @@ class _TimelineCanvas(QWidget):
             self._update_edge_scroll()
             return
         if isinstance(self._drag, _ReorderDrag):
-            if not self._drag.armed and abs(x - self._drag.press_x) >= DRAG_THRESHOLD_PX:
-                self._drag.armed = True
-            if self._drag.armed:
+            drag, track = self._drag, self.track
+            if drag.cancelled or track is None:
+                return
+            if not drag.armed and abs(x - drag.press_x) >= DRAG_THRESHOLD_PX:
+                drag.armed = True
+                drag.lifted, _ = lift_item(track, drag.start_index)
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            if drag.armed:
                 self._update_reorder_target(x)
                 self._update_edge_scroll()
             return
@@ -897,6 +978,8 @@ class _TimelineCanvas(QWidget):
             self._commit_trim(self._drag)
         elif track is not None and isinstance(self._drag, _ReorderDrag) and self._drag.armed:
             self._commit_reorder(self._drag)
+        if isinstance(self._drag, _ReorderDrag):
+            self.unsetCursor()
         self._drag = None
         self._edge_scroll_timer.stop()
         self.content_changed.emit()  # a lengthening trim may not have happened after all
@@ -914,13 +997,20 @@ class _TimelineCanvas(QWidget):
         let the drag follow, as though the mouse had moved over the content."""
         drag = self._drag
         step = edge_scroll_step(self._last_mouse_x, self.width())
-        if drag is None or (isinstance(drag, _ReorderDrag) and not drag.armed) or not step:
+        dragging = (
+            isinstance(drag, _TrimDrag)
+            or (isinstance(drag, _ReorderDrag) and drag.armed)
+            or self._bin_drop is not None
+        )
+        if not dragging or not step:
             self._edge_scroll_timer.stop()
             return
         left_px = round(self._view.scroll_offset * self._view.pixels_per_second)
         self.scroll_requested.emit(left_px + step)
         if isinstance(drag, _ReorderDrag):
             self._update_reorder_target(self._last_mouse_x)
+        elif self._bin_drop is not None:
+            self._update_bin_drop_target(self._last_mouse_x)
         else:
             self.content_changed.emit()
             self.update()
@@ -971,27 +1061,54 @@ class _TimelineCanvas(QWidget):
             return
         drag = self._drag
         assert isinstance(drag, _ReorderDrag)
+        if drag.lifted is None or self._project is None:
+            return
         # Past the edge of the view, the clip goes where the view's edge is
-        # (the view scrolls on to bring more into reach); past the last clip,
-        # to the end.
+        # (the view scrolls on to bring more into reach).
         x = max(0.0, min(x, self.width() - 1.0))
-        hit = hit_test(track, self._view, x)
-        drag.target_index = hit.index if hit is not None else len(track.items) - 1
+        duration = track.items[drag.start_index].duration
+        drag.target = drop_target(
+            drag.lifted,
+            self._view,
+            x,
+            duration,
+            ghost_x=x - drag.grab_px,
+            frame_rate=self._project.frame_rate,
+        )
         self.update()
 
     def _commit_reorder(self, drag: _ReorderDrag) -> None:
-        if self._project is None or self._undo_stack is None:
+        track = self.track
+        if self._project is None or self._undo_stack is None or track is None:
             return
-        if drag.target_index is None or drag.target_index == drag.start_index:
+        if drag.target is None:
             return
+        clip = track.items[drag.start_index]
+        index, offset = drag.target.index, drag.target.offset
         try:
+            if move_item(track, drag.start_index, index, offset) is track:
+                return  # dropped back where it was
             self._undo_stack.push(
-                MoveCommand(self._project, self._track_index, drag.start_index, drag.target_index)
+                MoveCommand(self._project, self._track_index, drag.start_index, index, offset)
             )
         except TimelineOpError:
-            pass
-        self._selected_index = drag.target_index
+            return
+        moved = self.track
+        assert moved is not None
+        self._selected_index = next(i for i, item in enumerate(moved.items) if item is clip)
         self.selection_changed.emit(self._selected_index)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Esc while moving a clip: never mind, it stays where it was."""
+        drag = self._drag
+        if event.key() == Qt.Key.Key_Escape and isinstance(drag, _ReorderDrag) and drag.armed:
+            drag.armed, drag.cancelled, drag.target = False, True, None
+            self._edge_scroll_timer.stop()
+            self.unsetCursor()
+            self.update()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     # --- right-click menu ----------------------------------------------------------
     #
@@ -1086,30 +1203,62 @@ class _TimelineCanvas(QWidget):
     # --- drag and drop, media bin -> timeline ---------------------------------------
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        if event.mimeData().hasFormat(MEDIA_MIME_TYPE):
+        if self._begin_bin_drop(event):
+            self._on_bin_drag_moved(event.position().x())
             event.acceptProposedAction()
 
-    def dropEvent(self, event: QDropEvent) -> None:
-        data = event.mimeData().data(MEDIA_MIME_TYPE)
-        if data.isEmpty():
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        if self._bin_drop is None:
+            event.ignore()
             return
-        media_id = bytes(data).decode("utf-8")
-        index = self._drop_index_for_x(event.position().x())
-        self.media_dropped.emit(media_id, index)
+        self._on_bin_drag_moved(event.position().x())
         event.acceptProposedAction()
 
-    def _drop_index_for_x(self, x: float) -> int:
-        """Which index a clip dropped at pixel `x` should land at: before
-        whichever existing item's nearer half it's over, or at the end if
-        it's past everything (or the track is empty)."""
-        track = self.track
-        if track is None or not track.items:
-            return 0
-        hit = hit_test(track, self._view, x)
-        if hit is None:
-            return len(track.items)
-        start_x, end_x = item_x_range(track, self._view, hit.index)
-        return hit.index if x < (start_x + end_x) / 2 else hit.index + 1
+    def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:
+        self._end_bin_drop()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        if self._bin_drop is None and self._begin_bin_drop(event):
+            self._update_bin_drop_target(event.position().x())
+        drop = self._bin_drop
+        self._end_bin_drop()
+        if drop is None or drop.target is None:
+            return
+        self.media_dropped.emit(drop.media_id, drop.target.index, drop.target.offset)
+        event.acceptProposedAction()
+
+    def _begin_bin_drop(self, event: QDropEvent) -> bool:
+        """Start showing where the media being dragged in would go, if it's
+        media from this project's bin."""
+        data = event.mimeData().data(MEDIA_MIME_TYPE)
+        if data.isEmpty() or self._project is None:
+            return False
+        media_id = bytes(data).decode("utf-8")
+        media = next((m for m in self._project.media if m.id == media_id), None)
+        if media is None:
+            return False
+        self._bin_drop = _BinDrop(media_id=media_id, clip=default_clip_for(media))
+        return True
+
+    def _on_bin_drag_moved(self, x: float) -> None:
+        self._last_mouse_x = x
+        self._update_bin_drop_target(x)
+        self._update_edge_scroll()
+
+    def _update_bin_drop_target(self, x: float) -> None:
+        drop, track = self._bin_drop, self.track
+        if drop is None or track is None or self._project is None:
+            return
+        x = max(0.0, min(x, self.width() - 1.0))
+        drop.target = drop_target(
+            track, self._view, x, drop.clip.duration, frame_rate=self._project.frame_rate
+        )
+        self.update()
+
+    def _end_bin_drop(self) -> None:
+        self._bin_drop = None
+        self._edge_scroll_timer.stop()
+        self.update()
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -1174,7 +1323,7 @@ def edge_scroll_step(x: float, width: int) -> int:
 class TimelineWidget(QWidget):
     playhead_moved = Signal(object)  # Fraction
     selection_changed = Signal(object)  # int | None
-    media_dropped = Signal(str, int)  # media_id, insert index
+    media_dropped = Signal(str, int, object)  # media_id, index, offset (see place_item)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1233,6 +1382,9 @@ class TimelineWidget(QWidget):
 
     def insert_clip(self, item: TrackItem, index: int | None = None, text: str = "Insert") -> None:
         self._canvas.insert_clip(item, index, text)
+
+    def place_clip(self, item: TrackItem, index: int, offset: Fraction) -> None:
+        self._canvas.place_clip(item, index, offset)
 
     def select(self, index: int | None) -> None:
         self._canvas.select(index)

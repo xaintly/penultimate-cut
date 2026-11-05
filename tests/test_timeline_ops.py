@@ -10,7 +10,9 @@ from penultimate_cut.model.timeline_ops import (
     delete_item,
     insert_item,
     item_at,
+    lift_item,
     move_item,
+    place_item,
     remove_gaps,
     remove_media,
     set_clip_options,
@@ -152,11 +154,91 @@ def test_trim_end_past_source_media_raises() -> None:
         trim_item(track, 0, "end", Fraction(11))
 
 
-def test_move_item_reorders() -> None:
-    clip_a, clip_b = make_clip("a.mp4"), make_clip("b.mp4")
-    track = Track(kind="video", items=[clip_a, clip_b])
-    new_track = move_item(track, 0, 1)
-    assert new_track.items == [clip_b, clip_a]
+def layout(track: Track) -> str:
+    """ "a3 _2 b5": clip a.mp4 for 3 s, 2 s of empty space, clip b.mp4 for 5 s."""
+    return " ".join(
+        f"_{item.duration}"
+        if isinstance(item, Gap)
+        else f"{item.media_ref.path.stem}{item.duration}"
+        for item in track.items
+    )
+
+
+def track_of(text: str) -> Track:
+    """The track `layout()` would describe as `text`."""
+    items: list[Clip | Gap] = []
+    for part in text.split():
+        name, duration = part[0], Fraction(part[1:])
+        items.append(Gap(duration=duration) if name == "_" else make_clip(f"{name}.mp4", duration))
+    return Track(kind="video", items=items)
+
+
+def test_place_item_between_clips_pushes_what_follows() -> None:
+    track = track_of("a3 b5")
+    assert layout(place_item(track, 1, Fraction(0), make_clip("x.mp4", Fraction(2)))) == "a3 x2 b5"
+    assert layout(place_item(track, 2, Fraction(0), make_clip("x.mp4", Fraction(2)))) == "a3 b5 x2"
+
+
+def test_place_item_into_empty_space_fills_it_and_what_follows_stays_put() -> None:
+    track = track_of("a3 _10 b5")
+    x = make_clip("x.mp4", Fraction(4))
+    assert layout(place_item(track, 1, Fraction(0), x)) == "a3 x4 _6 b5"
+    assert layout(place_item(track, 1, Fraction(6), x)) == "a3 _6 x4 b5"
+    assert layout(place_item(track, 1, Fraction(2), x)) == "a3 _2 x4 _4 b5"
+
+
+def test_place_item_longer_than_the_empty_space_moves_what_follows_by_the_rest() -> None:
+    track = track_of("a3 _2 b5")
+    assert layout(place_item(track, 1, Fraction(0), make_clip("x.mp4", Fraction(5)))) == "a3 x5 b5"
+
+
+def test_place_item_rejects_an_offset_outside_empty_space() -> None:
+    track = track_of("a3 _2 b5")
+    x = make_clip("x.mp4", Fraction(1))
+    for index, offset in ((0, Fraction(1)), (1, Fraction(2)), (1, Fraction(-1)), (4, Fraction(0))):
+        with pytest.raises(TimelineOpError):
+            place_item(track, index, offset, x)
+
+
+def test_lift_item_leaves_empty_space_joined_with_its_neighbours() -> None:
+    lifted, hole = lift_item(track_of("a3 x2 b5"), 1)
+    assert (layout(lifted), hole) == ("a3 _2 b5", 1)
+    lifted, hole = lift_item(track_of("a3 _1 x2 _4 b5"), 2)
+    assert (layout(lifted), hole) == ("a3 _7 b5", 1)
+    lifted, hole = lift_item(track_of("a3 x2"), 1)
+    assert (layout(lifted), hole) == ("a3 _2", 1)  # kept at the end, unlike after an edit
+
+
+def test_move_item_reorders_and_closes_up_where_it_was() -> None:
+    track = track_of("a3 x2 b5 c1")
+    # Lifted: "a3 _2 b5 c1" -- indices are into that.
+    assert layout(move_item(track, 1, 3, Fraction(0))) == "a3 b5 x2 c1"
+    assert layout(move_item(track, 1, 4, Fraction(0))) == "a3 b5 c1 x2"
+    assert layout(move_item(track, 1, 0, Fraction(0))) == "x2 a3 b5 c1"
+    # Back where it was: no change.
+    assert move_item(track, 1, 1, Fraction(0)) is track
+
+
+def test_move_item_into_empty_space_elsewhere_fills_it() -> None:
+    track = track_of("x2 a3 _10 b5")
+    # Lifted: "_2 a3 _10 b5". The spot x left closes up; the space it lands in shrinks.
+    assert layout(move_item(track, 0, 2, Fraction(0))) == "a3 x2 _8 b5"
+    assert layout(move_item(track, 0, 2, Fraction(8))) == "a3 _8 x2 b5"
+
+
+def test_move_item_within_its_own_empty_space_just_slides() -> None:
+    track = track_of("a3 x2 _6 b5")
+    # Lifted: "a3 _8 b5": sliding x 3 s later leaves everything else in place.
+    assert layout(move_item(track, 1, 1, Fraction(3))) == "a3 _3 x2 _3 b5"
+    assert layout(move_item(track, 1, 1, Fraction(6))) == "a3 _6 x2 b5"
+    assert move_item(track, 1, 1, Fraction(0)) is track
+
+
+def test_move_item_of_the_last_clip_past_the_end_stays_put() -> None:
+    track = track_of("a3 _1 x2")
+    # Lifted: "a3 _3" (kept at the end); x is dropped into its own space.
+    assert layout(move_item(track, 2, 1, Fraction(1))) == "a3 _1 x2"
+    assert layout(move_item(track, 2, 0, Fraction(0))) == "x2 a3"
 
 
 def test_insert_item_appends_at_end() -> None:

@@ -12,11 +12,10 @@ real widgets together:
   confirmation, when it has any).
 - Media bin double-click -> a default `Clip` for that media, appended to
   the timeline via an `InsertCommand`. Dragging a media bin entry onto the
-  timeline does the same thing, landing at wherever was dropped instead of
-  always the end -- `TimelineWidget.media_dropped` carries the media's id
-  (not a `MediaRef` itself: the timeline widget has no reason to know
-  about the media bin's entries) and the drop index it already computed
-  from the drop position.
+  timeline adds the same clip wherever it was dropped, via a
+  `PlaceCommand` (filling empty space it lands in) --
+  `TimelineWidget.media_dropped` carries the media's id and where it goes,
+  as the timeline already worked it out while showing the drop.
 - Timeline click/drag -> seeks the preview; the preview's own position
   (moving during playback) -> moves the timeline's playhead. Only the
   user-driven direction (`TimelineWidget.playhead_moved`) feeds the other
@@ -638,10 +637,10 @@ class MainWindow(QMainWindow):
     def _on_media_double_clicked(self, entry: MediaBinEntry) -> None:
         self.timeline.insert_clip(default_clip_for(entry.media_ref))
 
-    def _on_media_dropped(self, media_id: str, index: int) -> None:
+    def _on_media_dropped(self, media_id: str, index: int, offset: Fraction) -> None:
         entry = self.media_bin.get(media_id)
         if entry is not None:
-            self.timeline.insert_clip(default_clip_for(entry.media_ref), index=index)
+            self.timeline.place_clip(default_clip_for(entry.media_ref), index, offset)
 
     def _on_preview_position_changed(self, position: Fraction | None) -> None:
         if position is not None:

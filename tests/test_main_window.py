@@ -218,7 +218,7 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         # Dragging a media bin entry onto the timeline: same as
         # double-click, but landing at a specific index instead of always
         # the end.
-        window.timeline.media_dropped.emit(entry.media_ref.id, 0)
+        window.timeline.media_dropped.emit(entry.media_ref.id, 0, Fraction(0))
         assert len(window.project.tracks[0].items) == 2
         assert window.project.tracks[0].items[0].duration == Fraction(4)  # the whole new clip
         assert window.project.tracks[0].items[1].duration == Fraction(2)  # the pre-existing one

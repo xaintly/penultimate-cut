@@ -228,8 +228,15 @@ space**. Selecting empty space and pressing Delete also closes it.
 
 On the timeline, **right-click and drag** scrolls (the content follows the mouse);
 a right-click without dragging opens the menu. Left-drag stays reserved for moving
-and trimming clips. Dragging a clip near either edge of the timeline (or past it)
-scrolls it. In the media bin, drag an item between two others to reorder it; Delete or
+and trimming clips. Moving a clip (or dragging media in from the bin) leaves the
+track still: a see-through ghost follows the pointer and a marker shows where it
+will land, in front of or after the clip under the pointer. Empty space is filled,
+not pushed along: dropped into it (or at a clip end touching it), a clip takes up the
+space it covers and later clips stay put, snapping to either end of the space when
+within 30 px of it. A moved clip's old spot closes up, unless it's just slid along
+within the empty space around it. Esc cancels a move; empty space itself isn't
+dragged (`timeline_ops.place_item`/`move_item`, `geometry.drop_target`). Dragging a
+clip near either edge of the timeline (or past it) scrolls it. In the media bin, drag an item between two others to reorder it; Delete or
 right-click → **Remove from project** removes media: without asking if no clip uses it,
 otherwise after a confirmation (its clips may be off-screen), as one undoable edit. Right-click a clip → **Delete clip**, or
 **Edit → Delete Clip** for the clip under the playhead (greyed out when there's none);

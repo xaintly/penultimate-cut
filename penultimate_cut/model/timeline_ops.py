@@ -199,15 +199,84 @@ def insert_item(track: Track, index: int, item: TrackItem) -> Track:
     return replace(track, items=new_items)
 
 
-def move_item(track: Track, from_index: int, to_index: int) -> Track:
-    """Reorder an item within the track (drag-to-reorder)."""
-    _check_index(track, from_index)
-    if not (0 <= to_index < len(track.items)):
-        raise TimelineOpError(f"to_index {to_index} out of range")
+def place_item(track: Track, index: int, offset: Fraction, item: TrackItem) -> Track:
+    """Put `item` in front of `track.items[index]` (at the end for
+    `len(items)`): what dropping something onto the timeline does.
+
+    Into empty space (`items[index]` is a `Gap`), `item` goes `offset` into
+    it and takes up the space it covers, so what follows stays put -- or
+    moves on only by however much `item` is longer than the space left.
+    Anywhere else it's inserted, and what follows moves on by all of it.
+    """
+    if not (0 <= index <= len(track.items)):
+        raise TimelineOpError(f"index {index} out of range for track of {len(track.items)} items")
+    return replace(track, items=_tidy_gaps(_place(list(track.items), index, offset, item)))
+
+
+def lift_item(track: Track, index: int) -> tuple[Track, int]:
+    """`track` with the item at `index` taken out and empty space left in its
+    place, joined with any empty space either side -- the track as it is
+    while that item is being dragged somewhere else -- and the index of that
+    empty space. Unlike everywhere else, empty space at the end is kept."""
+    _check_index(track, index)
     items = list(track.items)
-    item = items.pop(from_index)
-    items.insert(to_index, item)
-    return replace(track, items=items)
+    start, end = index, index + 1
+    if start > 0 and isinstance(items[start - 1], Gap):
+        start -= 1
+    if end < len(items) and isinstance(items[end], Gap):
+        end += 1
+    hole = Gap(duration=sum((item.duration for item in items[start:end]), Fraction(0)))
+    return replace(track, items=[*items[:start], hole, *items[end:]]), start
+
+
+def move_item(track: Track, from_index: int, index: int, offset: Fraction) -> Track:
+    """Move the item at `from_index` to `index`/`offset` of the lifted track
+    (see `lift_item`, `place_item`): dragging a clip somewhere else.
+
+    Where it was closes up, as in a slideshow -- unless it's dropped back
+    into the empty space its own spot is part of: then it just slides
+    along, and nothing else moves. Returns `track` itself if that leaves
+    everything where it was.
+    """
+    item = track.items[from_index]
+    lifted, hole_index = lift_item(track, from_index)
+    if not (0 <= index <= len(lifted.items)):
+        raise TimelineOpError(f"index {index} out of range for track of {len(lifted.items)} items")
+    items = list(lifted.items)
+    if index != hole_index:
+        left = items[hole_index].duration - item.duration
+        if left > 0:
+            items[hole_index] = Gap(duration=left)
+        else:
+            del items[hole_index]
+            if index > hole_index:
+                index -= 1
+    moved = _tidy_gaps(_place(items, index, offset, item))
+    return track if _same_arrangement(moved, track.items) else replace(track, items=moved)
+
+
+def _same_arrangement(a: list[TrackItem], b: list[TrackItem]) -> bool:
+    """The same items in the same places; empty space compares by length."""
+    return len(a) == len(b) and all(
+        x is y or (isinstance(x, Gap) and isinstance(y, Gap) and x.duration == y.duration)
+        for x, y in zip(a, b, strict=True)
+    )
+
+
+def _place(
+    items: list[TrackItem], index: int, offset: Fraction, item: TrackItem
+) -> list[TrackItem]:
+    target = items[index] if index < len(items) else None
+    if not isinstance(target, Gap):
+        if offset:
+            raise TimelineOpError("an offset only goes into empty space")
+        return [*items[:index], item, *items[index:]]
+    if not (0 <= offset < target.duration):
+        raise TimelineOpError(f"offset {offset} is outside the empty space")
+    before: list[TrackItem] = [Gap(duration=offset)] if offset else []
+    left = target.duration - offset - item.duration
+    after: list[TrackItem] = [Gap(duration=left)] if left > 0 else []
+    return [*items[:index], *before, item, *after, *items[index + 1 :]]
 
 
 def _check_index(track: Track, index: int) -> None:

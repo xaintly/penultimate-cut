@@ -3,7 +3,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QUndoStack
+from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDropEvent, QUndoStack
 from PySide6.QtTest import QTest
 
 from penultimate_cut.model.project import (
@@ -301,16 +301,88 @@ def test_reorder_drag_commits_one_undo_step(qapp, make_video_clip) -> None:
         )
         QTest.mouseMove(canvas, QPoint(90, y))
         QTest.mouseMove(canvas, QPoint(200, y))
+        # Over the near half of clip_b: it would go back where it was.
+        assert canvas._drag.target.offset == 0 and canvas._drag.target.index == 0
+        QTest.mouseMove(canvas, QPoint(260, y))  # the far half: after clip_b
+        assert project.tracks[0].items == [clip_a, clip_b]  # nothing moves until the drop
         QTest.mouseRelease(
-            canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(200, y)
+            canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(260, y)
         )
         qapp.processEvents()
 
         assert stack.count() == 1
         assert project.tracks[0].items == [clip_b, clip_a]
+        assert canvas._selected_index == 1  # still the clip that was moved
 
         stack.undo()
         assert project.tracks[0].items == [clip_a, clip_b]
+    finally:
+        widget.shutdown()
+
+
+def test_moving_a_clip_shows_a_ghost_and_esc_cancels(qapp, tmp_path) -> None:
+    project = _two_clip_project(tmp_path / "x.mp4")
+    stack = QUndoStack()
+    widget = TimelineWidget()
+    try:
+        widget.resize(800, 150)
+        widget.set_project(project, stack)
+        widget.show()
+        qapp.processEvents()
+        canvas = widget._canvas
+        y = TRACK_TOP + 10
+        QTest.mousePress(
+            canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(50, y)
+        )
+        QTest.mouseMove(canvas, QPoint(380, y))
+        assert canvas._drag.armed and canvas._drag.target is not None
+        assert canvas.cursor().shape() == Qt.CursorShape.ClosedHandCursor
+        assert not widget.grab().isNull()  # shaded spot, ghost and marker paint
+
+        QTest.keyClick(canvas, Qt.Key.Key_Escape)
+        QTest.mouseMove(canvas, QPoint(390, y))
+        QTest.mouseRelease(
+            canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(390, y)
+        )
+        assert stack.count() == 0
+        assert canvas.cursor().shape() != Qt.CursorShape.ClosedHandCursor
+    finally:
+        widget.shutdown()
+
+
+def test_moving_a_clip_near_the_start_of_empty_space_fills_it_from_there(qapp, tmp_path) -> None:
+    media = make_media(tmp_path / "x.mp4")
+    a, b, c = (Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(3)) for _ in "abc")
+    project = Project(
+        frame_rate=Fraction(30),
+        tracks=[Track(kind="video", items=[a, b, Gap(duration=Fraction(10)), c])],
+        media=[media],
+    )
+    stack = QUndoStack()
+    widget = TimelineWidget()
+    try:
+        widget.resize(1100, 150)
+        widget.set_project(project, stack)
+        widget.show()
+        qapp.processEvents()
+        canvas = widget._canvas
+        y = TRACK_TOP + 10
+        # a: 0-150 px, b: 150-300, empty space: 300-800, c: 800-950. Grabbed
+        # 75 px in, a's ghost starts 10 px into the space: close enough.
+        QTest.mousePress(
+            canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(75, y)
+        )
+        QTest.mouseMove(canvas, QPoint(100, y))
+        QTest.mouseMove(canvas, QPoint(385, y))
+        assert canvas._drag.target.time == 6  # snapped to the start of the space
+        QTest.mouseRelease(
+            canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(385, y)
+        )
+
+        items = project.tracks[0].items
+        assert items[:2] == [b, a] and items[3] is c
+        assert isinstance(items[2], Gap) and items[2].duration == 7  # a's spot closed up
+        assert stack.count() == 1
     finally:
         widget.shutdown()
 
@@ -655,21 +727,44 @@ def test_frames_on_screen_are_made_before_those_near_it(qapp, tmp_path, monkeypa
         widget.shutdown()
 
 
-def test_drag_enter_with_media_mime_type_accepts(qapp) -> None:
+def _media_event(cls, media_id: bytes, x: float):
+    """A drag/drop event carrying `media_id` as the media bin does, and its
+    mime data (which has to outlive the event)."""
+    mime = QMimeData()
+    mime.setData(MEDIA_MIME_TYPE, media_id)
+    event = cls(
+        QPointF(x, 40),
+        Qt.DropAction.CopyAction,
+        mime,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    return event, mime
 
+
+def test_drag_enter_with_media_from_the_project_accepts(qapp, tmp_path) -> None:
+    project = _two_clip_project(tmp_path / "x.mp4")
     widget = TimelineWidget()
     try:
-        mime = QMimeData()
-        mime.setData(MEDIA_MIME_TYPE, b"some-media-id")
-        event = QDragEnterEvent(
-            QPointF(10, 10),
-            Qt.DropAction.CopyAction,
-            mime,
-            Qt.MouseButton.LeftButton,
-            Qt.KeyboardModifier.NoModifier,
-        )
+        widget.set_project(project, QUndoStack())
+        event, _mime = _media_event(QDragEnterEvent, project.media[0].id.encode(), 10)
         widget._canvas.dragEnterEvent(event)
         assert event.isAccepted()
+        assert widget._canvas._bin_drop is not None
+
+        widget._canvas.dragLeaveEvent(QDragLeaveEvent())
+        assert widget._canvas._bin_drop is None
+    finally:
+        widget.shutdown()
+
+
+def test_drag_enter_with_media_not_in_the_project_does_not_accept(qapp, tmp_path) -> None:
+    widget = TimelineWidget()
+    try:
+        widget.set_project(_two_clip_project(tmp_path / "x.mp4"), QUndoStack())
+        event, _mime = _media_event(QDragEnterEvent, b"some-other-media-id", 10)
+        widget._canvas.dragEnterEvent(event)
+        assert not event.isAccepted()
     finally:
         widget.shutdown()
 
@@ -697,58 +792,58 @@ def _two_clip_project(source) -> Project:
     media = make_media(source, duration=10.0)
     clip1 = Clip(media_ref=media, source_in=Fraction(0), source_out=Fraction(5))
     clip2 = Clip(media_ref=media, source_in=Fraction(5), source_out=Fraction(8))
-    return Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[clip1, clip2])])
+    return Project(
+        frame_rate=Fraction(30),
+        tracks=[Track(kind="video", items=[clip1, clip2])],
+        media=[media],
+    )
 
 
-def test_drop_index_for_x_on_empty_track(qapp) -> None:
-    project = Project(frame_rate=Fraction(30), tracks=[Track(kind="video", items=[])])
-    widget = TimelineWidget()
-    try:
-        widget.set_project(project, QUndoStack())
-        assert widget._canvas._drop_index_for_x(500) == 0
-    finally:
-        widget.shutdown()
-
-
-def test_drop_index_for_x_between_and_past_clips(qapp, make_video_clip) -> None:
-    source = make_video_clip("tlw_drop_index.mp4", duration=10.0, fps=30, size="320x240")
-    project = _two_clip_project(source)
-    widget = TimelineWidget()
-    try:
-        widget.set_project(project, QUndoStack())
-        # pixels_per_second defaults to 50: clip1 spans 0-250px, clip2 spans 250-400px.
-        assert widget._canvas._drop_index_for_x(50) == 0  # first half of clip1
-        assert widget._canvas._drop_index_for_x(200) == 1  # second half of clip1
-        assert widget._canvas._drop_index_for_x(300) == 1  # first half of clip2
-        assert widget._canvas._drop_index_for_x(350) == 2  # second half of clip2
-        assert widget._canvas._drop_index_for_x(1000) == 2  # past everything
-    finally:
-        widget.shutdown()
-
-
-def test_drop_event_emits_media_dropped_with_computed_index(qapp, make_video_clip) -> None:
-
-    source = make_video_clip("tlw_drop_event.mp4", duration=10.0, fps=30, size="320x240")
-    project = _two_clip_project(source)
+def test_drop_event_emits_where_the_media_goes(qapp, tmp_path) -> None:
+    project = _two_clip_project(tmp_path / "x.mp4")
+    media_id = project.media[0].id
     widget = TimelineWidget()
     try:
         widget.set_project(project, QUndoStack())
         received = []
-        widget.media_dropped.connect(lambda media_id, index: received.append((media_id, index)))
+        widget.media_dropped.connect(lambda *args: received.append(args))
 
-        mime = QMimeData()
-        mime.setData(MEDIA_MIME_TYPE, b"the-media-id")
-        event = QDropEvent(
-            QPointF(350, 40),
-            Qt.DropAction.CopyAction,
-            mime,
-            Qt.MouseButton.LeftButton,
-            Qt.KeyboardModifier.NoModifier,
-        )
-        widget._canvas.dropEvent(event)
+        # At 50 px/s: clip1 spans 0-250 px, clip2 250-400 px.
+        for x, index in ((50, 0), (200, 1), (300, 1), (350, 2), (1000, 2)):
+            enter, _m1 = _media_event(QDragEnterEvent, media_id.encode(), x)
+            widget._canvas.dragEnterEvent(enter)
+            drop, _m2 = _media_event(QDropEvent, media_id.encode(), x)
+            widget._canvas.dropEvent(drop)
+            assert received[-1] == (media_id, index, Fraction(0))
+            assert drop.isAccepted()
+            assert widget._canvas._bin_drop is None
+    finally:
+        widget.shutdown()
 
-        assert received == [("the-media-id", 2)]
-        assert event.isAccepted()
+
+def test_dragging_media_over_empty_space_shows_exactly_where_it_lands(qapp, tmp_path) -> None:
+    project = _two_clip_project(tmp_path / "x.mp4")
+    clip1, clip2 = project.tracks[0].items
+    project.tracks[0] = Track(kind="video", items=[clip1, Gap(duration=Fraction(20)), clip2])
+    media_id = project.media[0].id
+    widget = TimelineWidget()
+    try:
+        widget.resize(1400, 150)
+        widget.set_project(project, QUndoStack())
+        widget.show()
+        received = []
+        widget.media_dropped.connect(lambda *args: received.append(args))
+
+        # The empty space spans 5-25 s; the 10 s clip's ghost starts at the pointer.
+        enter, _m1 = _media_event(QDragEnterEvent, media_id.encode(), 12 * 50)
+        widget._canvas.dragEnterEvent(enter)
+        target = widget._canvas._bin_drop.target
+        assert (target.index, target.offset, target.into_space) == (1, Fraction(7), True)
+        assert not widget.grab().isNull()  # ghost and marker paint
+
+        drop, _m2 = _media_event(QDropEvent, media_id.encode(), 12 * 50)
+        widget._canvas.dropEvent(drop)
+        assert received == [(media_id, 1, Fraction(7))]
     finally:
         widget.shutdown()
 
@@ -758,7 +853,7 @@ def test_drop_event_without_media_mime_type_does_nothing(qapp) -> None:
     widget = TimelineWidget()
     try:
         received = []
-        widget.media_dropped.connect(lambda media_id, index: received.append((media_id, index)))
+        widget.media_dropped.connect(lambda *args: received.append(args))
 
         mime = QMimeData()
         mime.setText("unrelated")

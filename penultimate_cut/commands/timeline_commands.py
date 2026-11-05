@@ -173,9 +173,23 @@ class InsertCommand(_TrackSwapCommand):
         super().__init__(text, project, track_index, new_track)
 
 
-class MoveCommand(_TrackSwapCommand):
-    """Reorder an item within the track (drag-to-reorder)."""
+class PlaceCommand(_TrackSwapCommand):
+    """Drop a new clip onto the track, filling empty space it lands in (see
+    `timeline_ops.place_item`)."""
 
-    def __init__(self, project: Project, track_index: int, from_index: int, to_index: int) -> None:
-        new_track = timeline_ops.move_item(project.tracks[track_index], from_index, to_index)
+    def __init__(
+        self, project: Project, track_index: int, index: int, offset: Fraction, item: TrackItem
+    ) -> None:
+        new_track = timeline_ops.place_item(project.tracks[track_index], index, offset, item)
+        super().__init__("Insert", project, track_index, new_track)
+
+
+class MoveCommand(_TrackSwapCommand):
+    """Drag an item somewhere else on the track (see `timeline_ops.move_item`:
+    `index` and `offset` are into the track with the item lifted out)."""
+
+    def __init__(
+        self, project: Project, track_index: int, from_index: int, index: int, offset: Fraction
+    ) -> None:
+        new_track = timeline_ops.move_item(project.tracks[track_index], from_index, index, offset)
         super().__init__("Move", project, track_index, new_track)

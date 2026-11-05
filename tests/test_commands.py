@@ -8,6 +8,7 @@ from penultimate_cut.commands.timeline_commands import (
     DeleteCommand,
     InsertCommand,
     MoveCommand,
+    PlaceCommand,
     SetClipOptionsCommand,
     SetFitModeCommand,
     SetTitleCommand,
@@ -101,9 +102,26 @@ def test_move_command_and_undo_restores() -> None:
     original_track = project.tracks[0]
     stack = QUndoStack()
 
-    stack.push(MoveCommand(project, 0, 0, 1))
+    stack.push(MoveCommand(project, 0, 0, 2, Fraction(0)))  # after b, in "_ b" (a lifted)
 
     assert project.tracks[0].items == [clip_b, clip_a]
+
+    stack.undo()
+    assert project.tracks[0] is original_track
+
+
+def test_place_command_fills_empty_space_and_undo_restores() -> None:
+    clip_a, clip_b, new = make_clip("a.mp4"), make_clip("b.mp4"), make_clip("n.mp4", Fraction(4))
+    project = make_project(clip_a, Gap(duration=Fraction(10)), clip_b)
+    original_track = project.tracks[0]
+    stack = QUndoStack()
+
+    stack.push(PlaceCommand(project, 0, 1, Fraction(0), new))
+
+    items = project.tracks[0].items
+    assert items[:2] == [clip_a, new] and items[3] is clip_b
+    assert isinstance(items[2], Gap) and items[2].duration == 6
+    assert stack.undoText() == "Insert"
 
     stack.undo()
     assert project.tracks[0] is original_track
