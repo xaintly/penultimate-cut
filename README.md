@@ -54,6 +54,7 @@ these.
 | L | Play faster: 1.5×, 2×, 4×, 10× |
 | ← / → | Previous / next frame |
 | Shift+← / Shift+→ | Back / forward 1 second |
+| ↑ / ↓ (or Ctrl+← / Ctrl+→) | Previous / next cut between clips |
 | Home / End | Go to start / end |
 | S | Split at the playhead |
 | Delete | Delete the selected clip, leaving empty space |
@@ -107,8 +108,17 @@ See `CLAUDE.md` for the full project brief (goals, architecture, feature phases)
 
 ## Download
 
-Get the Windows installer (`PenultimateCutSetup-x.y.z.exe`) from the
+**[Get it from the Microsoft Store](https://apps.microsoft.com/detail/9P84FCQCLZ5G)**
+(recommended). It's free, installs without warnings, and updates itself.
+
+Or download the installer (`PenultimateCutSetup-x.y.z.exe`) from the
 [Releases page](https://github.com/xaintly/penultimate-cut/releases/latest).
+It doesn't need administrator rights. Because the app is new, Windows may say
+"Windows protected your PC" when you run it: click **More info**, then
+**Run anyway**. This copy doesn't update itself; download new versions from
+the same page. Install from one place or the other, not both: the two copies
+keep separate settings.
+
 Windows 10/11, 64-bit. Everything it needs (including ffmpeg) is bundled;
 Python isn't required.
 
