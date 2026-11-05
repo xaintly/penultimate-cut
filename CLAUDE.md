@@ -145,6 +145,12 @@ vendor/                  # ffmpeg.exe, ffprobe.exe, libmpv-2.dll (gitignored; fe
 5. **Time.** Store times as rational numbers (`fractions.Fraction` seconds or OTIO
    `RationalTime`), never floats, so splits land on exact frames and repeated edits
    don't drift. Snap edit points to the source clip's frame boundaries.
+6. **Media is untrusted input.** Every ffmpeg/ffprobe input reads local (or network
+   share) files only (`media/executables.py: local_files_only`), so a crafted file
+   (an HLS playlist naming a URL, say) can't make it fetch anything; mpv gets the same
+   via `demuxer-lavf-o` and never uses youtube-dl. The app makes no network
+   connections. Keeping the bundled ffmpeg/libmpv current is the main security upkeep.
+   The installer is per-user (`PrivilegesRequired=lowest`): no admin rights, ever.
 
 ### Project file details
 
@@ -355,6 +361,16 @@ reading any instructions.
   fill (see Export section).
 - **Group** two or more clips so they move together until ungrouped (needs
   multi-select on the timeline first).
+- **Markers**: `M` drops one at the playhead, shown as a small flag above the
+  timeline; right-click to name it or delete it. Attached to the clip at a source
+  frame (so trimming and moving keep it on its frame), saved as OTIO markers.
+  Go to Previous/Next Cut also stops at markers. Nothing to do with in/out points or
+  modes.
+- **Rename clip** (right-click → Rename…): the name replaces the file name on the
+  timeline; the tooltip still shows the file. Saved as the OTIO clip's name.
+- **Two-up trim view**: while dragging a trim handle, the preview shows the frame
+  just before the cut beside the frame just after it, for matching an edit by eye
+  (e.g. rejoining two exports of the same recording).
 
 ### Phase 3 — Helpful extras
 
@@ -374,6 +390,9 @@ reading any instructions.
 - Automatic face detection + tracking for blur (detection is easy; reliable tracking
   with review/correction is the real work).
 - Webcam / screen recording (PowerPoint's Record feature and OBS already cover this).
+- Automatic overlap detection: find where one clip repeats the end of another (two
+  exports of the same recording) and offer to join them. Clever but rarely needed;
+  markers and the two-up trim view cover it by hand.
 
 ### Non-goals
 

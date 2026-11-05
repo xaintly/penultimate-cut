@@ -30,7 +30,12 @@ from fractions import Fraction
 from pathlib import Path
 from typing import IO
 
-from penultimate_cut.media.executables import NO_WINDOW, ExecutableNotFoundError, locate
+from penultimate_cut.media.executables import (
+    NO_WINDOW,
+    ExecutableNotFoundError,
+    local_files_only,
+    locate,
+)
 
 
 class RunnerError(RuntimeError):
@@ -71,7 +76,15 @@ def run_export(
     except ExecutableNotFoundError as exc:
         raise RunnerError(str(exc)) from exc
 
-    full_args = [ffmpeg, "-y", *args, "-progress", "pipe:1", "-nostats", str(output_path)]
+    full_args = [
+        ffmpeg,
+        "-y",
+        *local_files_only(args),
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        str(output_path),
+    ]
     process = subprocess.Popen(
         full_args,
         stdout=subprocess.PIPE,

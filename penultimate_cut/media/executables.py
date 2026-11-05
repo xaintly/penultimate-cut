@@ -14,8 +14,25 @@ console of its own, so without this Windows opens a console window for every
 ffmpeg run (one flash per thumbnail, and a black window throughout export)."""
 
 
+LOCAL_FILES_ONLY = ["-protocol_whitelist", "file"]
+"""Options for every input ffmpeg/ffprobe opens: read local (or network
+share) files and nothing else. Some formats -- HLS playlists, concat lists
+-- name other things to open, URLs included; a crafted "video" must not be
+able to make ffmpeg fetch from, or send to, the internet."""
+
+
 class ExecutableNotFoundError(RuntimeError):
     pass
+
+
+def local_files_only(args: list[str]) -> list[str]:
+    """ffmpeg `args` with `LOCAL_FILES_ONLY` in front of every `-i`."""
+    restricted: list[str] = []
+    for arg in args:
+        if arg == "-i":
+            restricted += LOCAL_FILES_ONLY
+        restricted.append(arg)
+    return restricted
 
 
 def vendor_dir() -> Path:

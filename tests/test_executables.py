@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from penultimate_cut.media.executables import ExecutableNotFoundError, locate, vendor_dir
+from penultimate_cut.media.executables import (
+    LOCAL_FILES_ONLY,
+    ExecutableNotFoundError,
+    local_files_only,
+    locate,
+    vendor_dir,
+)
 
 
 def test_vendor_dir_in_dev_mode_is_repo_root_vendor(monkeypatch) -> None:
@@ -53,3 +59,11 @@ def test_locate_raises_when_not_found_anywhere(monkeypatch, tmp_path) -> None:
 
     with pytest.raises(ExecutableNotFoundError):
         locate("ffmpeg")
+
+
+def test_local_files_only_restricts_every_input() -> None:
+    args = ["-f", "lavfi", "-i", "color", "-loop", "1", "-i", "a.png", "-c:v", "libx264"]
+    assert local_files_only(args) == [
+        "-f", "lavfi", *LOCAL_FILES_ONLY, "-i", "color",
+        "-loop", "1", *LOCAL_FILES_ONLY, "-i", "a.png", "-c:v", "libx264",
+    ]  # fmt: skip

@@ -1,3 +1,4 @@
+import socket
 import subprocess
 from fractions import Fraction
 from pathlib import Path
@@ -133,3 +134,31 @@ def test_probe_reports_non_square_pixels_at_display_width(tmp_path: Path) -> Non
     )  # fmt: skip
     info = probe(anamorphic)
     assert (info.width, info.height) == (426, 240)  # 320 * 4/3, truncated to even
+
+
+def test_a_playlist_pointing_at_the_network_is_refused_without_a_request(tmp_path: Path) -> None:
+    """A "video" that's really an HLS playlist naming a URL: ffprobe reads
+    local files only, so the import fails and nothing is fetched."""
+    requests: list[bytes] = []
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    server.settimeout(0.2)
+    port = server.getsockname()[1]
+    playlist = tmp_path / "not_a_video.m3u8"
+    playlist.write_text(
+        f"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nhttp://127.0.0.1:{port}/x.ts\n"
+        "#EXT-X-ENDLIST\n"
+    )
+    try:
+        with pytest.raises(ProbeError):
+            probe(playlist)
+        try:
+            connection, _ = server.accept()
+            requests.append(connection.recv(100))
+            connection.close()
+        except TimeoutError:
+            pass
+    finally:
+        server.close()
+    assert requests == []

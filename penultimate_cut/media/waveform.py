@@ -21,7 +21,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from penultimate_cut.media.cache import cache_dir_for
-from penultimate_cut.media.executables import NO_WINDOW, ExecutableNotFoundError, locate
+from penultimate_cut.media.executables import (
+    NO_WINDOW,
+    ExecutableNotFoundError,
+    local_files_only,
+    locate,
+)
 
 PEAKS_PER_SECOND = 50
 """Detail of the stored waveform: one pixel per peak at the timeline's
@@ -118,6 +123,7 @@ def _compute(media_path: Path, cancel_check: Callable[[], bool]) -> Waveform:
     )
     args = [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(media_path)]
     args += ["-vn", "-map", "0:a:0", "-af", audio_filter, "-f", "null", "-"]
+    args = local_files_only(args)
 
     lows = array("f")
     highs = array("f")

@@ -59,6 +59,15 @@ class Player:
             # default unloads the file there and goes idle, after which play
             # and seek silently do nothing until the next edit reloads it.
             "keep_open": "yes",
+            # Media only reaches mpv as a segment of our EDL, after ffprobe
+            # (restricted to local files) has accepted it; checked live, a
+            # playlist pointing at a URL makes no request from there. These
+            # narrow things further anyway: ffmpeg inside mpv reads only
+            # local files, and no URL is ever handed to youtube-dl.
+            # (`access_references=no` would be stricter still, but it stops
+            # the EDL itself from loading its segments.)
+            "demuxer_lavf_o": "protocol_whitelist=file",
+            "ytdl": False,
         }
         if wid is not None:
             mpv_kwargs["wid"] = wid

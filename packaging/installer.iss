@@ -21,6 +21,10 @@ AppId={{D79C6304-65EF-4389-AB74-4C8D9A8E997C}}
 AppName=Penultimate Cut
 AppVersion={#AppVersion}
 AppPublisher=Penultimate Cut
+; Installed for the current user (%LOCALAPPDATA%\Programs), so it never asks
+; for admin rights -- and never shows Windows' "Unknown publisher" admin
+; prompt. The app writes nothing outside the user's own folders anyway.
+PrivilegesRequired=lowest
 DefaultDirName={autopf}\PenultimateCut
 DefaultGroupName=Penultimate Cut
 UninstallDisplayIcon={app}\PenultimateCut.exe

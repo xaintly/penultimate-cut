@@ -16,7 +16,12 @@ from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
-from penultimate_cut.media.executables import NO_WINDOW, ExecutableNotFoundError, locate
+from penultimate_cut.media.executables import (
+    LOCAL_FILES_ONLY,
+    NO_WINDOW,
+    ExecutableNotFoundError,
+    locate,
+)
 
 STILL_IMAGE_DURATION = Fraction(24 * 60 * 60)
 """Still images have no intrinsic duration. This stands in for "as long as you
@@ -106,9 +111,9 @@ def _picture_rotation(path: Path) -> int:
     only reports on the decoded frame, not on the stream; 0 if unknown."""
     try:
         result = subprocess.run(
-            [locate("ffprobe"), "-v", "error", "-select_streams", "v:0", "-show_frames",
-             "-read_intervals", "%+#1", "-show_entries", "frame_side_data", "-print_format",
-             "json", str(path)],
+            [locate("ffprobe"), *LOCAL_FILES_ONLY, "-v", "error", "-select_streams", "v:0",
+             "-show_frames", "-read_intervals", "%+#1", "-show_entries", "frame_side_data",
+             "-print_format", "json", str(path)],
             capture_output=True, text=True, check=True, creationflags=NO_WINDOW,
         )  # fmt: skip
         frames = json.loads(result.stdout).get("frames", [])
@@ -194,6 +199,7 @@ def _ffprobe_json(path: Path) -> dict:
         result = subprocess.run(
             [
                 ffprobe,
+                *LOCAL_FILES_ONLY,
                 "-v",
                 "error",
                 "-print_format",
