@@ -124,6 +124,7 @@ from penultimate_cut.model.project import (
     default_clip_for,
     new_title_clip,
 )
+from penultimate_cut.model.timeline_ops import next_cut, previous_cut
 from penultimate_cut.ui.about_dialog import AboutDialog
 from penultimate_cut.ui.clip_properties import ClipPropertiesPanel
 from penultimate_cut.ui.export_dialog import ExportDialog
@@ -348,9 +349,10 @@ class MainWindow(QMainWindow):
     def _build_play_menu(self) -> None:
         play_menu = self.menuBar().addMenu("&Play")
 
-        def add(text: str, key: str, handler: Callable[[], None]) -> QAction:
+        def add(text: str, keys: str, handler: Callable[[], None]) -> QAction:
+            """`keys`: one or more, comma-separated; the menu shows the first."""
             action = play_menu.addAction(text)
-            action.setShortcut(QKeySequence(key))
+            action.setShortcuts([QKeySequence(key.strip()) for key in keys.split(",")])
             action.triggered.connect(handler)
             return action
 
@@ -376,11 +378,19 @@ class MainWindow(QMainWindow):
         add("Forward 1 Second", "Shift+Right", lambda: self._jump_by(Fraction(1)))
         add("Back 1 Second", "Shift+Left", lambda: self._jump_by(Fraction(-1)))
         play_menu.addSeparator()
+        # Up/Down as in most editors; Ctrl+arrows as in text, a word at a time.
+        add("Go to Previous Cut", "Up, Ctrl+Left", lambda: self._jump_to_cut(previous_cut))
+        add("Go to Next Cut", "Down, Ctrl+Right", lambda: self._jump_to_cut(next_cut))
         add("Go to Start", "Home", lambda: self._jump_to(Fraction(0)))
         add("Go to End", "End", lambda: self._jump_to(self.project.duration))
 
     def _jump_by(self, delta: Fraction) -> None:
         self._jump_to(self.timeline.playhead + delta)
+
+    def _jump_to_cut(self, find: Callable[[Track, Fraction, Fraction], Fraction]) -> None:
+        """To the previous/next point where clips (or empty space) meet."""
+        half_frame = 1 / (2 * self.project.frame_rate)
+        self._jump_to(find(self.project.tracks[0], self.timeline.playhead, half_frame))
 
     def _jump_to(self, position: Fraction) -> None:
         position = max(Fraction(0), min(position, self.project.duration))

@@ -106,10 +106,11 @@ class PreviewWidget(QWidget):
         click_to_jump(self._volume_slider)
 
         transport = QHBoxLayout()
+        # The frame steps mirror each other around Play; Faster goes after.
         transport.addWidget(self._back_button)
         transport.addWidget(self._play_button)
-        transport.addWidget(self._faster_button)
         transport.addWidget(self._forward_button)
+        transport.addWidget(self._faster_button)
         transport.addWidget(self._slider)
         transport.addWidget(self._time_label)
         transport.addSpacing(12)

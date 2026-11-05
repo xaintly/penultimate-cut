@@ -207,6 +207,7 @@ vendor/                  # ffmpeg.exe, ffprobe.exe, libmpv-2.dll (gitignored; fe
 | Shift+Delete | Remove selected segment and close the gap (ripple) |
 | ← / → | Step one frame back / forward |
 | Shift+← / → | Jump 1 second |
+| ↑ / ↓ (also Ctrl+← / →) | Go to the previous / next cut (where clips or empty space meet, or the start/end) |
 | + / − | Zoom timeline in / out (around the playhead) |
 | Mouse wheel | Zoom timeline around the pointer; Shift+wheel scrolls |
 | Ctrl+I | Import media |
@@ -217,7 +218,8 @@ vendor/                  # ffmpeg.exe, ffprobe.exe, libmpv-2.dll (gitignored; fe
 
 Keys live on menu actions so the menus show them (**File**: Import Media…; **Edit**: Undo,
 Redo, Split, Delete Clip, Delete and Close Gap, Add Title; **View**: Zoom In/Out on Timeline; **Play**: Play /
-Pause, Faster, Playback Speed ▸ 0.1×–10×, frame/second steps, Go to Start/End; **Help**:
+Pause, Faster, Playback Speed ▸ 0.1×–10×, frame/second steps, Go to Previous/Next Cut,
+Go to Start/End; **Help**:
 About). Only Delete and Shift+Delete are plain shortcuts. No reverse
 play (J) or separate pause (K): clicking the timeline or stepping back covers it.
 The current speed shows next to the time when it isn't 1×.

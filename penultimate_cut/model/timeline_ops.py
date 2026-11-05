@@ -279,6 +279,28 @@ def _place(
     return [*items[:index], *before, item, *after, *items[index + 1 :]]
 
 
+def cut_points(track: Track) -> list[Fraction]:
+    """The start, the end, and every point where two items meet (empty
+    space included): where Go to Previous/Next Cut stops."""
+    points = [Fraction(0)]
+    for item in track.items:
+        points.append(points[-1] + item.duration)
+    return sorted(set(points))
+
+
+def next_cut(track: Track, position: Fraction, tolerance: Fraction = Fraction(0)) -> Fraction:
+    """The first cut point after `position` (the end, once past them all).
+    Within `tolerance` of a cut counts as on it -- a playhead reported by
+    the player is rarely exactly on the frame."""
+    points = cut_points(track)
+    return next((p for p in points if p > position + tolerance), points[-1])
+
+
+def previous_cut(track: Track, position: Fraction, tolerance: Fraction = Fraction(0)) -> Fraction:
+    """The last cut point before `position` (the start, at the very start)."""
+    return next((p for p in reversed(cut_points(track)) if p < position - tolerance), Fraction(0))
+
+
 def _check_index(track: Track, index: int) -> None:
     if not (0 <= index < len(track.items)):
         raise TimelineOpError(f"index {index} out of range for track of {len(track.items)} items")

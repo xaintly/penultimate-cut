@@ -7,12 +7,15 @@ import pytest
 from penultimate_cut.model.project import Clip, Gap, MediaRef, Title, Track, new_title_clip
 from penultimate_cut.model.timeline_ops import (
     TimelineOpError,
+    cut_points,
     delete_item,
     insert_item,
     item_at,
     lift_item,
     move_item,
+    next_cut,
     place_item,
+    previous_cut,
     remove_gaps,
     remove_media,
     set_clip_options,
@@ -171,6 +174,22 @@ def track_of(text: str) -> Track:
         name, duration = part[0], Fraction(part[1:])
         items.append(Gap(duration=duration) if name == "_" else make_clip(f"{name}.mp4", duration))
     return Track(kind="video", items=items)
+
+
+def test_cut_points_and_jumping_between_them() -> None:
+    track = track_of("a3 _2 b5")
+    assert cut_points(track) == [0, 3, 5, 10]
+    assert next_cut(track, Fraction(0)) == 3
+    assert next_cut(track, Fraction(3)) == 5
+    assert next_cut(track, Fraction(10)) == 10  # at the end: stays
+    assert previous_cut(track, Fraction(4)) == 3
+    assert previous_cut(track, Fraction(3)) == 0
+    assert previous_cut(track, Fraction(0)) == 0
+    # Within the tolerance of a cut counts as on it.
+    near = Fraction(3) - Fraction(1, 100)
+    assert next_cut(track, near, Fraction(1, 60)) == 5
+    assert previous_cut(track, Fraction(3) + Fraction(1, 100), Fraction(1, 60)) == 0
+    assert cut_points(Track(kind="video", items=[])) == [0]
 
 
 def test_place_item_between_clips_pushes_what_follows() -> None:

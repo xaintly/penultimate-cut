@@ -81,6 +81,8 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         assert menu_keys["Back 1 Second"] == "Shift+Left"
         assert menu_keys["Go to Start"] == "Home"
         assert menu_keys["Go to End"] == "End"
+        assert menu_keys["Go to Previous Cut"] == "Up"
+        assert menu_keys["Go to Next Cut"] == "Down"
         assert menu_keys["Add Title"] == "Ctrl+T"
         assert not window._add_title_button.isHidden()
         # Undo/Redo live in the Edit menu (with their Ctrl+Z/Ctrl+Y
@@ -222,6 +224,20 @@ def test_end_to_end_editing_flow(qapp, make_video_clip) -> None:
         assert len(window.project.tracks[0].items) == 2
         assert window.project.tracks[0].items[0].duration == Fraction(4)  # the whole new clip
         assert window.project.tracks[0].items[1].duration == Fraction(2)  # the pre-existing one
+
+        # Previous/Next Cut walk the points where clips meet (0, 4, 6),
+        # Ctrl+arrows too.
+        previous, following = play_actions["Go to Previous Cut"], play_actions["Go to Next Cut"]
+        assert [k.toString() for k in following.shortcuts()] == ["Down", "Ctrl+Right"]
+        assert [k.toString() for k in previous.shortcuts()] == ["Up", "Ctrl+Left"]
+        stops = []
+        for _ in range(3):
+            following.trigger()
+            stops.append(window.timeline.playhead)
+        assert stops == [4, 6, 6]
+        window._jump_to(Fraction(4) + Fraction(1, 1000))  # a hair past the cut: still on it
+        previous.trigger()
+        assert window.timeline.playhead == 0
 
         # Zoom.
         baseline = window.timeline._canvas._view.pixels_per_second
