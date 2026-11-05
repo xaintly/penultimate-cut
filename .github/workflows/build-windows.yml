@@ -63,10 +63,21 @@ jobs:
           }
           & $isccPath packaging/installer.iss "/DAppVersion=${{ steps.version.outputs.value }}"
 
+      # The Microsoft Store package, unsigned: uploaded to Partner Center
+      # by hand, where the Store signs it.
+      - name: Build Store package (MSIX)
+        shell: pwsh
+        run: ./scripts/build_msix.ps1
+
       - uses: actions/upload-artifact@v4
         with:
           name: PenultimateCut-Setup-${{ steps.version.outputs.value }}
           path: packaging/dist/PenultimateCutSetup-*.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PenultimateCut-Store-${{ steps.version.outputs.value }}
+          path: packaging/dist/PenultimateCut-*.msix
 
       # A version tag also publishes a GitHub Release with the installer
       # attached: the public download page (artifacts above need a GitHub
