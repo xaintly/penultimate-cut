@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    Fetches ffmpeg.exe, ffprobe.exe, and libmpv-2.dll into vendor/, plus
+    Fetches ffmpeg.exe, ffprobe.exe (and the ffmpeg DLLs they share), and
+    libmpv-2.dll into vendor/, plus
     vendor/licenses/ (ffmpeg's license notice and which builds these are).
 
 .DESCRIPTION
@@ -15,7 +16,10 @@
     from https://7-zip.org or `winget install 7zip.7zip` if missing).
 
     Sources, and why: ffmpeg/ffprobe come from BtbN's GPL Windows builds
-    (CLAUDE.md calls for a GPL ffmpeg with libx264 bundled in); libmpv comes
+    (CLAUDE.md calls for a GPL ffmpeg with libx264 bundled in), the "shared"
+    flavour: ffmpeg.exe and ffprobe.exe are small and share one set of
+    av*/sw* DLLs, where the static flavour builds all of ffmpeg into each
+    exe (about 150 MB more installed). libmpv comes
     from shinchiro's mpv-winbuild-cmake "dev" build, the commonly-used
     source for python-mpv on Windows. Both repos' "latest release" rotates
     its assets over time rather than keeping old ones at a fixed URL
@@ -41,18 +45,27 @@ function Find-SevenZip {
 }
 
 try {
-    Write-Host "Fetching ffmpeg/ffprobe (BtbN GPL build)..."
+    Write-Host "Fetching ffmpeg/ffprobe (BtbN GPL shared build)..."
     $ffmpegZip = Join-Path $tempDir "ffmpeg.zip"
-    Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile $ffmpegZip
+    Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip" -OutFile $ffmpegZip
     $ffmpegExtract = Join-Path $tempDir "ffmpeg_extracted"
     Expand-Archive -Path $ffmpegZip -DestinationPath $ffmpegExtract -Force
     $ffmpegBin = Get-ChildItem -Path $ffmpegExtract -Recurse -Directory -Filter "bin" | Select-Object -First 1
     if (-not $ffmpegBin) {
         throw "Couldn't find a bin/ folder inside the downloaded ffmpeg build -- its layout may have changed."
     }
+    # Every DLL in vendor/ but libmpv's is ffmpeg's: clear them first so a
+    # newer build's renamed DLLs (avcodec-63 -> -64) don't pile up beside
+    # the old ones. ffplay.exe isn't used.
+    Get-ChildItem $vendorDir -Filter "*.dll" | Where-Object { $_.Name -ne "libmpv-2.dll" } | Remove-Item -Force
     Copy-Item (Join-Path $ffmpegBin.FullName "ffmpeg.exe") $vendorDir -Force
     Copy-Item (Join-Path $ffmpegBin.FullName "ffprobe.exe") $vendorDir -Force
-    Write-Host "  -> vendor/ffmpeg.exe, vendor/ffprobe.exe"
+    $ffmpegDlls = Get-ChildItem $ffmpegBin.FullName -Filter "*.dll"
+    if (-not ($ffmpegDlls | Where-Object { $_.Name -like "avcodec-*.dll" })) {
+        throw "No avcodec-*.dll in the downloaded ffmpeg build -- is it still the shared one?"
+    }
+    $ffmpegDlls | Copy-Item -Destination $vendorDir -Force
+    Write-Host "  -> vendor/ffmpeg.exe, vendor/ffprobe.exe, vendor/av*.dll, vendor/sw*.dll"
 
     # The build's own license notice ships with the app (see
     # packaging/penultimate_cut.spec's gather_licenses).
@@ -88,7 +101,7 @@ try {
         "Builds bundled with this copy of Penultimate Cut",
         "",
         "FFmpeg: $ffmpegVersion",
-        "  from https://github.com/BtbN/FFmpeg-Builds/releases (ffmpeg-master-latest-win64-gpl)",
+        "  from https://github.com/BtbN/FFmpeg-Builds/releases (ffmpeg-master-latest-win64-gpl-shared)",
         "  The 'N-...-g<hash>' part names the FFmpeg source commit: https://github.com/FFmpeg/FFmpeg",
         "",
         "libmpv: $($mpvAsset.name)",

@@ -106,7 +106,9 @@ This produces `packaging/dist/PenultimateCutSetup-0.91.exe`. If you leave out
 ### `scripts/fetch_vendor.ps1`
 
 Downloads the bundled programs into `vendor/`:
-- ffmpeg and ffprobe, from BtbN's GPL build
+- ffmpeg and ffprobe, from BtbN's GPL "shared" build: two small programs
+  sharing one set of ffmpeg DLLs (`av*.dll`, `sw*.dll`), rather than two
+  copies of ffmpeg built into each
 - libmpv, from shinchiro's build
 
 It also copies ffmpeg's license and writes `vendor/licenses/BUILD_SOURCES.txt`.

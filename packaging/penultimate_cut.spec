@@ -43,9 +43,47 @@ repo_root = Path(SPECPATH).resolve().parent  # noqa: F821
 vendor_dir = repo_root / "vendor"
 resources_dir = repo_root / "penultimate_cut" / "resources"
 
+# ffmpeg.exe and ffprobe.exe, the ffmpeg DLLs they share, and libmpv-2.dll.
 vendor_binaries = [
-    (str(vendor_dir / name), "vendor") for name in ("ffmpeg.exe", "ffprobe.exe", "libmpv-2.dll")
+    (str(path), "vendor")
+    for path in [vendor_dir / "ffmpeg.exe", vendor_dir / "ffprobe.exe", *sorted(vendor_dir.glob("*.dll"))]
 ]
+
+# Qt pieces PySide6's hooks bring along that the app never uses (about 40 MB):
+# Qt Quick/QML (only for the on-screen keyboard plugin), Qt PDF (the PDF
+# image plugin), Qt Network (TLS and network-status plugins), the software
+# OpenGL fallback (the widgets don't use OpenGL; mpv uses the system's), and
+# Qt's own translations of its standard dialogs (the app is English only).
+# Matched against each file's destination path, lowercased, with "/".
+UNUSED_QT = (
+    "pyside6/opengl32sw.dll",
+    "pyside6/qt6quick",
+    "pyside6/qt6qml",
+    "pyside6/qt6virtualkeyboard",
+    "pyside6/qt6pdf",
+    "pyside6/qt6opengl",
+    "pyside6/qt6network",
+    "pyside6/qtnetwork",
+    "pyside6/plugins/platforminputcontexts/",
+    "pyside6/plugins/imageformats/qpdf",
+    "pyside6/plugins/tls/",
+    "pyside6/plugins/networkinformation/",
+    "pyside6/plugins/generic/",
+    "pyside6/translations/",
+)
+
+
+def without_unused_qt(toc):
+    return [entry for entry in toc if not entry[0].replace("\\", "/").lower().startswith(UNUSED_QT)]
+
+
+def without_vendor_copies(toc):
+    """PyInstaller copies the DLLs a binary loads beside PenultimateCut.exe,
+    so ffmpeg's would be there twice (about 180 MB more); ffmpeg.exe finds
+    them beside itself in vendor/."""
+    vendored = {Path(source).name.lower() for source, _ in vendor_binaries}
+    return [entry for entry in toc if entry[0].replace("\\", "/").lower() not in vendored]
+
 
 
 def gather_licenses() -> Path:
@@ -95,9 +133,11 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=["PySide6.QtNetwork"],
     noarchive=False,
 )
+a.binaries = without_vendor_copies(without_unused_qt(a.binaries))
+a.datas = without_unused_qt(a.datas)
 pyz = PYZ(a.pure, a.zipped_data)
 
 exe = EXE(

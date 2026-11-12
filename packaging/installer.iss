@@ -40,9 +40,18 @@ WizardStyle=modern
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[InstallDelete]
+; Installing over an older version only overwrites files, never removes
+; them, so files a newer build no longer has (Qt pieces the spec now leaves
+; out, ffmpeg DLLs renamed by a newer build) would stay behind. These two
+; folders hold only bundled files, so clear them first.
+Type: filesandordirs; Name: "{app}\PySide6"
+Type: filesandordirs; Name: "{app}\vendor"
+
 [Files]
 ; Everything PyInstaller produced -- the exe, the Python runtime, bundled
-; packages, and vendor/ (ffmpeg.exe, ffprobe.exe, libmpv-2.dll) -- all as
+; packages, and vendor/ (ffmpeg.exe, ffprobe.exe and their DLLs,
+; libmpv-2.dll) -- all as
 ; one flat tree, since packaging/penultimate_cut.spec's
 ; contents_directory="." keeps PyInstaller from nesting it under its own
 ; _internal/ subfolder.

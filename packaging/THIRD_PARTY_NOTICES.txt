@@ -14,7 +14,7 @@ Source code: https://github.com/xaintly/penultimate-cut
 Bundled software
 ----------------
 
-FFmpeg (ffmpeg.exe, ffprobe.exe in the vendor folder)
+FFmpeg (ffmpeg.exe, ffprobe.exe and the av*/sw* DLLs in the vendor folder)
   A GPL build including libx264 and other GPL components, so it is
   distributed under the GNU General Public License, version 3 (GPL-3.0.txt).
   Its own notice, listing the components it includes, is FFmpeg-LICENSE.txt.
