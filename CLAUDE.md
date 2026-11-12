@@ -384,6 +384,11 @@ reading any instructions.
   as `.srt`.
 - **Proxies**: background-generated low-res, short-GOP copies for smooth scrubbing of
   long or high-res sources; used for preview only, never export.
+- **Translations** of the app (menus, buttons, dialogs, tooltips, messages) and its
+  Store listing, following Windows' display language. Qt's `tr()` + `pyside6-lupdate`
+  → `.qm` files; also bring back Qt's own translations of its standard dialogs (the
+  spec currently leaves them out). Mostly mechanical; the ongoing cost is keeping each
+  language current as text changes.
 
 ### Maybe later (only if the filter says yes)
 
